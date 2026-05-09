@@ -1,0 +1,36 @@
+Windows Registry Editor Version 5.00
+
+; 注册 mdedit 为 Markdown 文件编辑器
+; 用法:用记事本打开此文件,将路径修改为你的 mdedit.exe 实际位置,
+;      保存后双击运行即可。
+
+[HKEY_CLASSES_ROOT\mdedit]
+@="Markdown Document"
+
+[HKEY_CLASSES_ROOT\mdedit\DefaultIcon]
+@="C:\\Users\\UNICOM\\Documents\\code\\mdedit\\src-tauri\\target\\release\\mdedit.exe,0"
+
+[HKEY_CLASSES_ROOT\mdedit\shell]
+
+[HKEY_CLASSES_ROOT\mdedit\shell\open]
+
+[HKEY_CLASSES_ROOT\mdedit\shell\open\command]
+@="\"C:\\Users\\UNICOM\\Documents\\code\\mdedit\\src-tauri\\target\\release\\mdedit.exe\" \"%1\""
+
+; 关联 .md
+[HKEY_CLASSES_ROOT\.md]
+@="mdedit"
+"Content Type"="text/markdown"
+"PerceivedType"="text"
+
+; 关联 .markdown
+[HKEY_CLASSES_ROOT\.markdown]
+@="mdedit"
+"Content Type"="text/markdown"
+"PerceivedType"="text"
+
+; 关联 .mdown
+[HKEY_CLASSES_ROOT\.mdown]
+@="mdedit"
+"Content Type"="text/markdown"
+"PerceivedType"="text"

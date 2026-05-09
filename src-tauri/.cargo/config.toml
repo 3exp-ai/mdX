@@ -1,0 +1,8 @@
+# 用 rustup 自带的 rust-lld 替换 MSVC 默认的 link.exe。
+# rust-lld 在大型 Tauri 项目上链接速度通常比 link.exe 快 30%~50%。
+#
+# 如果换了 toolchain 或在别的机器上跑,把下面的路径改成你机器上的:
+#   $(rustc --print sysroot)/lib/rustlib/x86_64-pc-windows-msvc/bin/rust-lld.exe
+[target.x86_64-pc-windows-msvc]
+linker = "C:/Users/UNICOM/.rustup/toolchains/stable-x86_64-pc-windows-msvc/lib/rustlib/x86_64-pc-windows-msvc/bin/rust-lld.exe"
+rustflags = ["-C", "linker-flavor=lld-link"]

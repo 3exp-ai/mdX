@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>mdedit</title>
+  <script>window.__t0 = performance.now();</script>
+  <link rel="preload" href="app.bundle.js" as="script" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="editor"></div>
+  <div id="save-indicator" style="
+    position: fixed;
+    bottom: 20px;
+    right: 28px;
+    font-size: 12px;
+    color: var(--muted);
+    opacity: 0;
+    transition: opacity 0.3s;
+    pointer-events: none;
+    z-index: 100;
+  ">已保存</div>
+  <div id="boot-timing" style="
+    position: fixed;
+    bottom: 20px;
+    left: 28px;
+    font-size: 11px;
+    color: var(--muted);
+    opacity: 0;
+    transition: opacity 0.4s;
+    pointer-events: none;
+    z-index: 100;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+  "></div>
+  <script src="app.bundle.js"></script>
+</body>
+</html>

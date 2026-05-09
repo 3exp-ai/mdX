@@ -1,0 +1,163 @@
+/* ============================================================
+   主题变量:浅色 / 深色自适应
+   ============================================================ */
+:root {
+  --bg: #fafafa;
+  --text: #2c2c2c;
+  --muted: #999;
+  --accent: #0066cc;
+  --code-bg: rgba(0, 0, 0, 0.06);
+  --selection-bg: rgba(0, 102, 204, 0.18);
+  --rule: rgba(0, 0, 0, 0.08);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1a1a1a;
+    --text: #e6e6e6;
+    --muted: #707070;
+    --accent: #58a6ff;
+    --code-bg: rgba(255, 255, 255, 0.08);
+    --selection-bg: rgba(88, 166, 255, 0.25);
+    --rule: rgba(255, 255, 255, 0.08);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  font-size: 17px;
+  line-height: 1.75;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* 全局隐藏滚动条,但保留滚动能力 */
+* {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+*::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+  background: transparent;
+}
+
+#editor {
+  height: 100vh;
+  width: 100vw;
+}
+
+/* ============================================================
+   CodeMirror 容器:与外部完全融合
+   ============================================================ */
+.cm-editor {
+  background-color: transparent !important;
+  height: 100%;
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  line-height: inherit;
+}
+
+.cm-editor.cm-focused {
+  outline: none !important;
+}
+
+.cm-scroller {
+  font-family: inherit;
+  line-height: inherit;
+  overflow: auto;
+}
+
+/* 居中阅读区:小屏 20px 边距,大屏自动居中,最大宽度 720px */
+.cm-content {
+  padding: 80px max(20px, calc((100vw - 720px) / 2)) 30vh;
+  caret-color: var(--accent);
+  font-family: inherit;
+  color: var(--text);
+}
+
+.cm-line {
+  padding: 0 2px;
+}
+
+.cm-cursor,
+.cm-dropCursor {
+  border-left: 2px solid var(--accent) !important;
+}
+
+.cm-selectionBackground,
+.cm-line::selection,
+.cm-line ::selection,
+.cm-content ::selection {
+  background: var(--selection-bg) !important;
+}
+
+/* ============================================================
+   Markdown 渲染样式
+   ============================================================ */
+
+/* 标题:整行 line-decoration */
+/* 注意:必须用 padding-top 而不是 margin-top —— margin 不计入 CodeMirror
+   的行块高度,会让 posAtCoords 把点击映射到下一行。
+   `!important` 是为了压过 CM 默认主题的 `.cm-line { padding: 0 ... }` 简写。 */
+.cm-heading {
+  font-weight: 700;
+  line-height: 1.3;
+  padding-top: 0.6em !important;
+}
+.cm-heading-1 {
+  font-size: 2em;
+}
+.cm-heading-2 {
+  font-size: 1.55em;
+}
+.cm-heading-3 {
+  font-size: 1.3em;
+}
+.cm-heading-4 {
+  font-size: 1.1em;
+}
+.cm-heading-5 {
+  font-size: 1em;
+}
+.cm-heading-6 {
+  font-size: 0.95em;
+  color: var(--muted);
+}
+
+/* 行内强调 */
+.cm-em {
+  font-style: italic;
+}
+.cm-strong {
+  font-weight: 700;
+}
+
+/* 内联代码 */
+.cm-inline-code {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Courier New",
+    monospace;
+  font-size: 0.92em;
+  background: var(--code-bg);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+/* 当光标进入行内时,Markdown 语法符号弱化显示 */
+.cm-syntax-mark {
+  color: var(--muted);
+  opacity: 0.55;
+}
