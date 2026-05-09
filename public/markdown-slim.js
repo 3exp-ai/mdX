@@ -54,7 +54,11 @@ const InlineMathExt = {
     parse(cx, next, pos) {
       if (next != 36) return -1;
       if (cx.char(pos + 1) == 36) return -1;
-      if (pos > 0 && /\d/.test(cx.slice(pos - 1, pos))) return -1;
+      // Avoid matching $ in prices like 5$
+      if (pos > cx.offset) {
+        const prev = cx.char(pos - 1);
+        if (prev >= 48 && prev <= 57) return -1;
+      }
       for (let i = pos + 1; i < cx.end; i++) {
         const ch = cx.char(i);
         if (ch == 36 && cx.char(i + 1) != 36 && i > pos + 1) {
@@ -132,6 +136,7 @@ const FootnoteRefExt = {
       }
       return -1;
     },
+    before: "Link",
   }],
 };
 
