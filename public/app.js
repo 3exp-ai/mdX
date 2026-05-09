@@ -135,7 +135,19 @@ if (isTauri) {
 // -------------------------------------------------------------
 // 白名单:需要被隐藏 / 弱化的 Markdown 语法符号节点名。
 // -------------------------------------------------------------
-const HIDABLE_MARKS = new Set(["HeaderMark", "EmphasisMark", "CodeMark"]);
+const HIDABLE_MARKS = new Set([
+  "HeaderMark",
+  "EmphasisMark",
+  "CodeMark",
+  "HighlightMark",
+  "MathMark",
+  "FootnoteRefMark",
+  "StrikethroughMark",
+  "TaskMarker",
+  "QuoteMark",
+  "ListMark",
+  "LinkMark",
+]);
 
 // =============================================================
 // 核心插件:动态装饰器 (Hybrid Rendering Plugin)
@@ -147,10 +159,8 @@ const hybridRenderingPlugin = ViewPlugin.fromClass(
     }
 
     update(update) {
-      // 增量映射旧 decorations，避免纯文本输入后位置漂移
       this.decorations = this.decorations.map(update.changes);
 
-      // 优化1: 同行内光标移动不重建
       if (
         update.selectionSet &&
         !update.docChanged &&
@@ -165,7 +175,6 @@ const hybridRenderingPlugin = ViewPlugin.fromClass(
         if (oldLine === newLine) return;
       }
 
-      // 优化2: 普通文本输入(不跨行、不含 Markdown 标记字符)不重建
       if (
         update.docChanged &&
         !update.selectionSet &&
@@ -175,7 +184,7 @@ const hybridRenderingPlugin = ViewPlugin.fromClass(
           let hasMarker = false;
           update.changes.iterChanges((fromA, toA, fromB, toB, inserted) => {
             if (hasMarker) return;
-            if (/[#`*_\[\]>\-|!]/.test(inserted.toString())) {
+            if (/[#`*_\[\]>\-|!=^$~]/.test(inserted.toString())) {
               hasMarker = true;
             }
           });
@@ -222,6 +231,19 @@ const hybridRenderingPlugin = ViewPlugin.fromClass(
               );
             }
 
+            // Setext headings
+            if (node.name.startsWith("SetextHeading")) {
+              const level = node.name.charAt(13);
+              const line = doc.lineAt(node.from);
+              decorations.push(
+                Decoration.line({
+                  attributes: {
+                    class: `cm-heading cm-heading-${level}`,
+                  },
+                }).range(line.from)
+              );
+            }
+
             if (node.name === "Emphasis") {
               decorations.push(
                 Decoration.mark({ class: "cm-em" }).range(
@@ -236,9 +258,156 @@ const hybridRenderingPlugin = ViewPlugin.fromClass(
                   node.to
                 )
               );
+            } else if (node.name === "Strikethrough") {
+              decorations.push(
+                Decoration.mark({ class: "cm-strikethrough" }).range(
+                  node.from,
+                  node.to
+                )
+              );
             } else if (node.name === "InlineCode") {
               decorations.push(
                 Decoration.mark({ class: "cm-inline-code" }).range(
+                  node.from,
+                  node.to
+                )
+              );
+            } else if (node.name === "Highlight") {
+              decorations.push(
+                Decoration.mark({ class: "cm-highlight" }).range(
+                  node.from,
+                  node.to
+                )
+              );
+            } else if (node.name === "InlineMath") {
+              decorations.push(
+                Decoration.mark({ class: "cm-inline-math" }).range(
+                  node.from,
+                  node.to
+                )
+              );
+            } else if (node.name === "BlockMath") {
+              decorations.push(
+                Decoration.mark({ class: "cm-block-math" }).range(
+                  node.from,
+                  node.to
+                )
+              );
+            } else if (node.name === "FootnoteRef") {
+              decorations.push(
+                Decoration.mark({ class: "cm-footnote-ref" }).range(
+                  node.from,
+                  node.to
+                )
+              );
+            } else if (node.name === "Link") {
+              decorations.push(
+                Decoration.mark({ class: "cm-link" }).range(
+                  node.from,
+                  node.to
+                )
+              );
+            } else if (node.name === "Image") {
+              decorations.push(
+                Decoration.mark({ class: "cm-image" }).range(
+                  node.from,
+                  node.to
+                )
+              );
+            } else if (node.name === "URL") {
+              decorations.push(
+                Decoration.mark({ class: "cm-url" }).range(
+                  node.from,
+                  node.to
+                )
+              );
+            } else if (node.name === "FencedCode") {
+              decorations.push(
+                Decoration.mark({ class: "cm-fenced-code" }).range(
+                  node.from,
+                  node.to
+                )
+              );
+            } else if (node.name === "CodeBlock") {
+              decorations.push(
+                Decoration.mark({ class: "cm-code-block" }).range(
+                  node.from,
+                  node.to
+                )
+              );
+            } else if (node.name === "HorizontalRule") {
+              decorations.push(
+                Decoration.mark({ class: "cm-hr" }).range(
+                  node.from,
+                  node.to
+                )
+              );
+            } else if (node.name === "Blockquote") {
+              decorations.push(
+                Decoration.mark({ class: "cm-blockquote" }).range(
+                  node.from,
+                  node.to
+                )
+              );
+            } else if (node.name === "BulletList") {
+              decorations.push(
+                Decoration.mark({ class: "cm-bullet-list" }).range(
+                  node.from,
+                  node.to
+                )
+              );
+            } else if (node.name === "OrderedList") {
+              decorations.push(
+                Decoration.mark({ class: "cm-ordered-list" }).range(
+                  node.from,
+                  node.to
+                )
+              );
+            } else if (node.name === "ListItem") {
+              decorations.push(
+                Decoration.mark({ class: "cm-list-item" }).range(
+                  node.from,
+                  node.to
+                )
+              );
+            } else if (node.name === "Task") {
+              decorations.push(
+                Decoration.mark({ class: "cm-task" }).range(
+                  node.from,
+                  node.to
+                )
+              );
+            } else if (node.name === "Table") {
+              decorations.push(
+                Decoration.mark({ class: "cm-table" }).range(
+                  node.from,
+                  node.to
+                )
+              );
+            } else if (node.name === "TableHeader") {
+              decorations.push(
+                Decoration.mark({ class: "cm-table-header" }).range(
+                  node.from,
+                  node.to
+                )
+              );
+            } else if (node.name === "TableRow") {
+              decorations.push(
+                Decoration.mark({ class: "cm-table-row" }).range(
+                  node.from,
+                  node.to
+                )
+              );
+            } else if (node.name === "TableCell") {
+              decorations.push(
+                Decoration.mark({ class: "cm-table-cell" }).range(
+                  node.from,
+                  node.to
+                )
+              );
+            } else if (node.name === "TableDelimiter") {
+              decorations.push(
+                Decoration.mark({ class: "cm-table-delimiter" }).range(
                   node.from,
                   node.to
                 )
@@ -295,7 +464,7 @@ const dirtyTracker = ViewPlugin.fromClass(
 );
 
 // =============================================================
-// 初始文档:空文档或欢迎语
+// 初始文档
 // =============================================================
 const initialDoc = `# 欢迎使用 mdedit
 
@@ -310,6 +479,14 @@ const initialDoc = `# 欢迎使用 mdedit
 
 把光标移动到这一行,你会看到 \`#\` 符号自动出现。
 当光标离开后,符号又会悄悄隐藏。
+
+~~删除线~~ 和 ==高亮文本== 也可以正常渲染。
+
+行内公式 $E=mc^2$ 和块级公式:
+
+$$
+a^2 + b^2 = c^2
+$$
 
 开始写作吧。
 `;
@@ -344,8 +521,7 @@ view.focus();
 // 暴露到全局
 window.editorView = view;
 
-// 启动耗时:从 HTML 头里的 window.__t0 起算到编辑器可交互。
-// 在屏幕左下角显示几秒后淡出,方便观察启动性能回归。
+// 启动耗时
 requestAnimationFrame(() => {
   const t1 = performance.now();
   const elapsed = window.__t0 ? Math.round(t1 - window.__t0) : null;
