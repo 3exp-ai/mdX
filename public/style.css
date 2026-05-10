@@ -57,7 +57,7 @@ html, body {
 }
 
 /* ============================================================
-   侧边栏 —— 懒加载文件树
+   侧边栏 —— 扁平时间流文件列表
    ============================================================ */
 #sidebar {
   position: fixed;
@@ -65,20 +65,21 @@ html, body {
   top: 0;
   width: 220px;
   height: 100vh;
-  background: rgba(0, 0, 0, 0.25);
+  background: rgba(0, 0, 0, 0.22);
   border-right: 1px solid var(--divider);
   display: flex;
   flex-direction: column;
   z-index: 50;
   font-size: 13px;
   user-select: none;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
 }
 
 #sidebar-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 12px 14px 8px;
+  padding: 14px 16px 10px;
   border-bottom: 1px solid var(--divider);
 }
 
@@ -90,96 +91,101 @@ html, body {
   letter-spacing: 0.5px;
 }
 
-#sidebar-new-btn {
-  background: transparent;
-  border: none;
+/* 操作按钮区 */
+#sidebar-actions {
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--divider);
+}
+
+#sidebar-actions button {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--divider);
   color: var(--muted);
-  font-size: 18px;
-  line-height: 1;
+  font-size: 11px;
+  padding: 5px 8px;
+  border-radius: 5px;
   cursor: pointer;
-  padding: 0 4px;
-  border-radius: 4px;
-  transition: color 0.2s, background 0.2s;
+  transition: all 0.15s;
+  white-space: nowrap;
 }
 
-#sidebar-new-btn:hover {
+#sidebar-actions button:hover {
+  background: rgba(255, 255, 255, 0.12);
   color: var(--text);
-  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.2);
 }
 
-#sidebar-tree {
+#sidebar-list {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
   padding: 4px 0;
 }
 
-/* 树节点 */
-.sidebar-node {
+/* 文件项 */
+.sidebar-item {
   display: flex;
-  align-items: center;
-  padding: 5px 12px 5px 14px;
+  flex-direction: column;
+  padding: 8px 14px 7px;
   cursor: pointer;
-  transition: background 0.15s;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  transition: background 0.1s;
+  border-left: 2px solid transparent;
+  margin: 0 6px;
+  border-radius: 6px;
 }
 
-.sidebar-node:hover {
+.sidebar-item:hover {
   background: rgba(255, 255, 255, 0.06);
 }
 
-.sidebar-node.active {
-  background: rgba(88, 166, 255, 0.15);
+.sidebar-item.active {
+  background: rgba(88, 166, 255, 0.1);
+  border-left-color: var(--accent);
 }
 
-.sidebar-node .icon {
-  width: 16px;
-  height: 16px;
-  margin-right: 8px;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 11px;
-}
-
-.sidebar-node .name {
-  flex: 1;
+.sidebar-item .item-name {
+  font-size: 13px;
+  color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.4;
 }
 
-/* 文件夹展开/折叠指示 */
-.sidebar-node.dir .icon::before {
-  content: "▸";
-  transition: transform 0.15s;
-}
-
-.sidebar-node.dir.expanded .icon::before {
-  content: "▾";
-}
-
-.sidebar-node.file .icon::before {
-  content: "◦";
+.sidebar-item .item-parent {
+  font-size: 11px;
   color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 1px;
+  line-height: 1.3;
 }
 
-/* 子节点容器 */
-.sidebar-children {
-  padding-left: 14px;
+.sidebar-item .item-mtime {
+  font-size: 10px;
+  color: rgba(153, 153, 153, 0.6);
+  margin-top: 2px;
+  line-height: 1.2;
 }
 
-.sidebar-children.collapsed {
-  display: none;
+/* 空状态 */
+.sidebar-empty {
+  padding: 30px 16px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 /* 侧边栏滚动条 */
-#sidebar-tree::-webkit-scrollbar {
+#sidebar-list::-webkit-scrollbar {
   width: 4px;
 }
-#sidebar-tree::-webkit-scrollbar-thumb {
+#sidebar-list::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.1);
   border-radius: 2px;
 }

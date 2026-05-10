@@ -171,6 +171,7 @@ async function performSave({ force = false, isAuto = false } = {}) {
         updateTitle();
         updateStatusBar("saved", result.timestamp);
         highlightSidebarActive();
+        refreshSidebarList();
         break;
       case "Conflict": updateStatusBar("conflict"); break;
       case "Draft": updateStatusBar("draft"); break;
@@ -204,7 +205,7 @@ async function performSaveAs() {
         updateTitle();
         updateStatusBar("saved", result.timestamp);
         highlightSidebarActive();
-        refreshSidebarTree();
+        refreshSidebarList();
         break;
       case "Error": updateStatusBar("error", result.message); break;
       case "Busy": updateStatusBar("busy"); break;
@@ -397,167 +398,148 @@ function setupScrollSync() {
 }
 
 // =============================================================
-// 侧边栏: 懒加载文件树
+// 侧边栏: 扁平时间流文件列表
+//
+// 核心设计:
+//   - 不显示文件夹层级，所有 .md 文件平铺展示
+//   - 按修改时间降序排列（最新的在前）
+//   - 每项显示: 文件名 + 所属文件夹名 + 修改时间
+//   - 实时扫描: 每次调用 load_sidebar_stream 重新 walkdir
+//   - 保存后自动刷新
 // =============================================================
 
-// 侧边栏根目录（默认从当前文件所在目录开始）
-let sidebarRootPath = null;
-
 function initSidebar() {
-  const newBtn = document.getElementById("sidebar-new-btn");
-  if (newBtn) {
-    newBtn.addEventListener("click", () => {
-      const parent = sidebarRootPath || "/tmp";
-      const name = window.prompt("新文件名:", "untitled.md");
-      if (name && name.trim()) createNewFile(parent, name.trim());
+  // [+] 添加文件夹
+  const addWsBtn = document.getElementById("sidebar-add-workspace");
+  if (addWsBtn) {
+    addWsBtn.addEventListener("click", async () => {
+      if (!invoke) return;
+      try {
+        await invoke("add_workspace");
+        // 添加成功后刷新列表
+        await refreshSidebarList();
+      } catch (e) {
+        console.log("Add workspace cancelled or failed:", e);
+      }
     });
   }
-  // 确定根目录
-  determineSidebarRoot();
+
+  // [+] 新建笔记
+  const newNoteBtn = document.getElementById("sidebar-new-note");
+  if (newNoteBtn) {
+    newNoteBtn.addEventListener("click", async () => {
+      const name = window.prompt("新笔记文件名:", "untitled.md");
+      if (name && name.trim()) {
+        await createNewNote(name.trim());
+      }
+    });
+  }
+
+  // 初始加载
+  refreshSidebarList();
 }
 
-async function determineSidebarRoot() {
+/// 从 Rust 加载扁平文件流并渲染
+async function refreshSidebarList() {
   if (!invoke) return;
-  // 优先从当前文件路径推断
-  if (docInfo.path) {
-    const parts = docInfo.path.split(/[\\/]/);
-    parts.pop(); // 去掉文件名
-    sidebarRootPath = parts.join("/");
-  } else {
-    // 草稿模式：用临时目录
-    sidebarRootPath = "/tmp";
-  }
-  await renderSidebarTree(sidebarRootPath, document.getElementById("sidebar-tree"));
-}
+  const container = document.getElementById("sidebar-list");
+  if (!container) return;
 
-// 渲染指定路径下的直接子节点到容器
-async function renderSidebarTree(dirPath, container, level = 0) {
-  if (!invoke || !container) return;
-  container.innerHTML = "";
+  container.innerHTML = '<div class="sidebar-empty">加载中...</div>';
+
   try {
-    const nodes = await invoke("read_dir_tree", { targetPath: dirPath });
-    for (const node of nodes) {
-      const el = createSidebarNode(node, level);
-      container.appendChild(el);
-    }
+    const files = await invoke("load_sidebar_stream");
+    renderSidebarList(files, container);
   } catch (e) {
-    console.error("Read dir failed:", e);
-    container.innerHTML = `<div style="padding:10px 14px;color:var(--muted);font-size:12px;">无法读取目录</div>`;
+    console.error("Load sidebar stream failed:", e);
+    container.innerHTML = `<div class="sidebar-empty">加载失败<br><small>${e}</small></div>`;
   }
 }
 
-// 创建单个树节点 DOM
-function createSidebarNode(node, level) {
-  const wrapper = document.createElement("div");
-  wrapper.className = "sidebar-node-wrapper";
-  wrapper.dataset.path = node.path;
-  wrapper.dataset.isDir = node.is_dir;
+/// 渲染文件列表到容器
+function renderSidebarList(files, container) {
+  container.innerHTML = "";
 
-  const row = document.createElement("div");
-  row.className = `sidebar-node ${node.is_dir ? "dir" : "file"}`;
-  row.style.paddingLeft = `${14 + level * 12}px`;
-  row.title = node.path;
+  if (!files || files.length === 0) {
+    container.innerHTML = `
+      <div class="sidebar-empty">
+        暂无笔记<br>
+        <small>点击「+ 新建笔记」开始写作</small>
+      </div>
+    `;
+    return;
+  }
 
-  // 图标
-  const icon = document.createElement("span");
-  icon.className = "icon";
-  row.appendChild(icon);
+  for (const file of files) {
+    const el = createSidebarItem(file);
+    container.appendChild(el);
+  }
+}
 
-  // 名称
-  const name = document.createElement("span");
-  name.className = "name";
-  name.textContent = node.name;
-  row.appendChild(name);
+/// 创建单个文件项 DOM
+function createSidebarItem(file) {
+  const item = document.createElement("div");
+  item.className = "sidebar-item";
+  item.dataset.path = file.path;
+  item.title = file.path;
 
-  wrapper.appendChild(row);
+  // 文件名
+  const nameEl = document.createElement("div");
+  nameEl.className = "item-name";
+  nameEl.textContent = file.name;
+  item.appendChild(nameEl);
+
+  // 所属文件夹名
+  const parentEl = document.createElement("div");
+  parentEl.className = "item-parent";
+  parentEl.textContent = file.parent_name;
+  item.appendChild(parentEl);
+
+  // 修改时间
+  const mtimeEl = document.createElement("div");
+  mtimeEl.className = "item-mtime";
+  mtimeEl.textContent = file.mtime_str;
+  item.appendChild(mtimeEl);
 
   // 高亮当前活跃文件
-  if (!node.is_dir && node.path === activeFilePath) {
-    row.classList.add("active");
+  if (file.path === activeFilePath) {
+    item.classList.add("active");
   }
 
-  // 点击事件
-  row.addEventListener("click", async (e) => {
-    e.stopPropagation();
-    if (node.is_dir) {
-      // 文件夹：展开/折叠
-      toggleSidebarDir(wrapper, node.path, level);
-    } else {
-      // 文件：安全切换
-      await switchToFile(node.path);
-    }
+  // 点击切换文件
+  item.addEventListener("click", async () => {
+    await switchToFile(file.path);
   });
 
-  // 子节点容器（初始折叠）
-  if (node.is_dir) {
-    const childrenContainer = document.createElement("div");
-    childrenContainer.className = "sidebar-children collapsed";
-    wrapper.appendChild(childrenContainer);
-  }
-
-  return wrapper;
+  return item;
 }
 
-// 展开/折叠文件夹
-async function toggleSidebarDir(wrapper, dirPath, level) {
-  const row = wrapper.querySelector(".sidebar-node");
-  const children = wrapper.querySelector(".sidebar-children");
-  if (!children) return;
-
-  const isExpanded = row.classList.contains("expanded");
-
-  if (isExpanded) {
-    // 折叠
-    row.classList.remove("expanded");
-    children.classList.add("collapsed");
-  } else {
-    // 展开：如果子节点为空，懒加载
-    if (children.children.length === 0) {
-      await renderSidebarTree(dirPath, children, level + 1);
-    }
-    row.classList.add("expanded");
-    children.classList.remove("collapsed");
-  }
-}
-
-// 高亮当前活跃文件
+/// 高亮当前活跃文件
 function highlightSidebarActive() {
-  document.querySelectorAll(".sidebar-node").forEach((el) => {
+  document.querySelectorAll(".sidebar-item").forEach((el) => {
     el.classList.remove("active");
   });
   if (!activeFilePath) return;
-  const wrappers = document.querySelectorAll(".sidebar-node-wrapper");
-  for (const w of wrappers) {
-    if (w.dataset.path === activeFilePath && w.dataset.isDir === "false") {
-      const row = w.querySelector(".sidebar-node");
-      if (row) row.classList.add("active");
+  const items = document.querySelectorAll(".sidebar-item");
+  for (const item of items) {
+    if (item.dataset.path === activeFilePath) {
+      item.classList.add("active");
       break;
     }
   }
 }
 
-// 新建文件
-async function createNewFile(parentPath, filename) {
+/// 新建笔记（在默认笔记目录）
+async function createNewNote(filename) {
   if (!invoke) return;
   try {
-    const newPath = await invoke("create_new_file", {
-      parentPath,
-      filename,
-    });
-    console.log("Created:", newPath);
-    // 刷新侧边栏
-    refreshSidebarTree();
-    // 自动切换到新文件
+    const newPath = await invoke("create_new_note", { filename });
+    console.log("Created note:", newPath);
+    // 刷新列表并切换到新文件
+    await refreshSidebarList();
     await switchToFile(newPath);
   } catch (e) {
-    alert("创建文件失败: " + e);
-  }
-}
-
-// 刷新侧边栏（重新加载根目录）
-async function refreshSidebarTree() {
-  if (sidebarRootPath) {
-    await renderSidebarTree(sidebarRootPath, document.getElementById("sidebar-tree"));
+    alert("创建笔记失败: " + e);
   }
 }
 

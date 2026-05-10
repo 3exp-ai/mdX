@@ -9,34 +9,26 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <!-- 侧边栏: 懒加载文件树 -->
+  <!-- 侧边栏: 扁平时间流文件列表 -->
   <div id="sidebar">
     <div id="sidebar-header">
-      <span id="sidebar-title">文件</span>
-      <button id="sidebar-new-btn" title="新建文件">+</button>
+      <span id="sidebar-title">笔记</span>
     </div>
-    <div id="sidebar-tree"></div>
+    <div id="sidebar-actions">
+      <button id="sidebar-add-workspace" title="添加文件夹">+ 添加文件夹</button>
+      <button id="sidebar-new-note" title="新建笔记">+ 新建笔记</button>
+    </div>
+    <div id="sidebar-list"></div>
   </div>
 
   <!-- 双栏分屏容器 -->
   <div id="split-container">
-    <!-- 左侧: 纯文本编辑区 (CodeMirror) -->
-    <div id="editor-pane">
-      <div id="editor"></div>
-    </div>
-    <!-- 中间: 极淡分割线 -->
+    <div id="editor-pane"><div id="editor"></div></div>
     <div id="divider"></div>
-    <!-- 右侧: 实时 HTML 预览区 -->
-    <div id="preview-pane">
-      <div id="preview"></div>
-    </div>
+    <div id="preview-pane"><div id="preview"></div></div>
   </div>
 
-  <!-- 状态栏: 保存中 / 已保存 / 草稿模式 / 冲突警告 -->
-  <div id="status-bar" class="idle">
-    <span id="status-text"></span>
-  </div>
-  <!-- 启动耗时 -->
+  <div id="status-bar" class="idle"><span id="status-text"></span></div>
   <div id="boot-timing"></div>
 
   <script src="app.bundle.js"></script>

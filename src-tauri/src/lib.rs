@@ -3,6 +3,7 @@ use std::sync::Mutex;
 use std::time::SystemTime;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewWindow, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
+use serde::{Deserialize, Serialize};
 
 // =============================================================
 // Syntect 全局实例 —— 惰性初始化，只加载一次语法定义
@@ -188,76 +189,216 @@ fn get_cli_file() -> Option<String> {
 }
 
 // =============================================================
-// 文件树节点 —— 懒加载只返回直接子节点
+// 配置系统 —— 只保存文件夹路径，不缓存任何文件列表
 // =============================================================
-#[derive(serde::Serialize, Clone, Debug)]
-pub struct DirNode {
-    pub name: String,
-    pub path: String,
-    pub is_dir: bool,
+
+/// 配置文件结构：极简，只存 workspaces 路径数组
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+struct Settings {
+    workspaces: Vec<String>,
 }
 
-/// 读取目录的直接子节点（只读一层，绝不递归）。
-///
-/// 过滤规则:
-///   - 跳过以 `.` 开头的隐藏文件/目录
-///   - 文件只保留 `.md` / `.markdown` / `.mdown` 后缀
-///   - 目录无后缀限制
-#[tauri::command]
-fn read_dir_tree(target_path: String) -> Result<Vec<DirNode>, String> {
-    let path = std::path::Path::new(&target_path);
-    let mut nodes = Vec::new();
+/// 侧边栏文件元信息 —— 按 mtime 降序排列
+#[derive(Serialize, Clone, Debug)]
+pub struct FileMeta {
+    pub name: String,
+    pub path: String,
+    /// 所属文件夹名（从路径截取，用于前端区分来源）
+    pub parent_name: String,
+    /// 修改时间字符串，用于前端显示
+    pub mtime_str: String,
+    /// 原始 mtime，用于排序
+    #[serde(skip)]
+    pub mtime: SystemTime,
+}
 
-    let entries = std::fs::read_dir(path).map_err(|e| format!("读取目录失败: {}", e))?;
+/// 获取配置目录（应用数据目录）
+fn get_config_dir() -> PathBuf {
+    let home = dirs::home_dir().unwrap_or_else(|| std::env::temp_dir());
+    home.join(".config").join("mdx")
+}
 
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
+/// 获取配置文件路径
+fn get_settings_path() -> PathBuf {
+    get_config_dir().join("settings.json")
+}
 
-        // 跳过隐藏文件/目录
-        if name_str.starts_with('.') {
-            continue;
-        }
+/// 获取默认笔记目录（~/Documents/mdX_Notes）
+fn get_default_notes_dir() -> PathBuf {
+    let home = dirs::home_dir().unwrap_or_else(|| std::env::temp_dir());
+    home.join("Documents").join("mdX_Notes")
+}
 
-        let metadata = entry.metadata().ok();
-        let is_dir = metadata.as_ref().map(|m| m.is_dir()).unwrap_or(false);
-        let entry_path = entry.path();
-        let path_str = entry_path.to_string_lossy().to_string();
-
-        if is_dir {
-            // 目录：无条件保留
-            nodes.push(DirNode {
-                name: name_str.to_string(),
-                path: path_str,
-                is_dir: true,
-            });
-        } else {
-            // 文件：只保留 Markdown 后缀
-            let ext = entry_path
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e.to_lowercase());
-            let is_md = matches!(ext.as_deref(), Some("md") | Some("markdown") | Some("mdown"));
-            if is_md {
-                nodes.push(DirNode {
-                    name: name_str.to_string(),
-                    path: path_str,
-                    is_dir: false,
-                });
+/// 读取配置
+fn load_settings() -> Settings {
+    let path = get_settings_path();
+    if path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(settings) = serde_json::from_str::<Settings>(&content) {
+                return settings;
             }
         }
     }
+    Settings::default()
+}
 
-    // 排序：目录在前，文件在后，各自按名称字母序
-    nodes.sort_by(|a, b| {
-        match (a.is_dir, b.is_dir) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+/// 保存配置
+fn save_settings(settings: &Settings) -> Result<(), String> {
+    let dir = get_config_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建配置目录失败: {}", e))?;
+    let path = get_settings_path();
+    let content = serde_json::to_string_pretty(settings)
+        .map_err(|e| format!("序列化配置失败: {}", e))?;
+    std::fs::write(&path, content).map_err(|e| format!("写入配置失败: {}", e))?;
+    Ok(())
+}
+
+/// 使用 walkdir 极速扫描目录下的所有 .md 文件
+/// 过滤规则：
+///   - 忽略隐藏目录（以 `.` 开头）
+///   - 忽略 node_modules
+///   - 只保留 .md / .markdown / .mdown 文件
+fn scan_md_files(dir: &std::path::Path) -> Vec<FileMeta> {
+    let mut files = Vec::new();
+
+    let walker = walkdir::WalkDir::new(dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            // 跳过隐藏目录和 node_modules
+            if e.file_type().is_dir() {
+                !name.starts_with('.') && name != "node_modules"
+            } else {
+                true
+            }
+        });
+
+    for entry in walker.flatten() {
+        if !entry.file_type().is_file() {
+            continue;
         }
-    });
+        let path = entry.path();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase());
+        let is_md = matches!(ext.as_deref(), Some("md") | Some("markdown") | Some("mdown"));
+        if !is_md {
+            continue;
+        }
 
-    Ok(nodes)
+        let name = path.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+
+        // 所属文件夹名：取父目录的目录名
+        let parent_name = path.parent()
+            .and_then(|p| p.file_name())
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+
+        let mtime = entry.metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+
+        files.push(FileMeta {
+            name,
+            path: path.to_string_lossy().to_string(),
+            parent_name,
+            mtime_str: fmt_time(mtime),
+            mtime,
+        });
+    }
+
+    files
+}
+
+/// 加载侧边栏文件流 —— 实时扫描，按 mtime 降序排列
+///
+/// 流程：
+///   1. 确保默认笔记目录存在
+///   2. 读取 settings.json 中的 workspaces
+///   3. 用 walkdir 扫描默认目录 + 所有外挂目录
+///   4. 按 mtime 降序排列，一次性返回
+#[tauri::command]
+fn load_sidebar_stream() -> Result<Vec<FileMeta>, String> {
+    // 1. 确保默认笔记目录存在
+    let default_dir = get_default_notes_dir();
+    if !default_dir.exists() {
+        std::fs::create_dir_all(&default_dir)
+            .map_err(|e| format!("创建默认笔记目录失败: {}", e))?;
+    }
+
+    // 2. 读取配置
+    let settings = load_settings();
+
+    // 3. 收集所有需要扫描的目录
+    let mut dirs_to_scan: Vec<PathBuf> = vec![default_dir];
+    for ws in &settings.workspaces {
+        let p = PathBuf::from(ws);
+        if p.exists() && p.is_dir() {
+            dirs_to_scan.push(p);
+        }
+    }
+
+    // 4. 扫描所有目录
+    let mut all_files: Vec<FileMeta> = Vec::new();
+    for dir in dirs_to_scan {
+        let mut files = scan_md_files(&dir);
+        all_files.append(&mut files);
+    }
+
+    // 5. 按 mtime 降序排列（最新的在前）
+    all_files.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+
+    Ok(all_files)
+}
+
+/// 添加工作区 —— 唤起文件夹选择器，将路径追加到 settings.json
+#[tauri::command]
+fn add_workspace(app_handle: AppHandle) -> Result<(), String> {
+    let result = app_handle
+        .dialog()
+        .file()
+        .blocking_pick_folder();
+
+    let file_path = match result {
+        Some(p) => p,
+        None => return Err("未选择文件夹".to_string()),
+    };
+
+    let path = file_path.into_path()
+        .map_err(|_| "无效的路径".to_string())?;
+
+    if path.as_os_str().is_empty() {
+        return Err("未选择文件夹".to_string());
+    }
+
+    let path_str = path.to_string_lossy().to_string();
+
+    // 读取现有配置，追加新路径
+    let mut settings = load_settings();
+    if !settings.workspaces.contains(&path_str) {
+        settings.workspaces.push(path_str);
+        save_settings(&settings)?;
+    }
+
+    Ok(())
+}
+
+/// 在默认笔记目录下创建新文件（侧边栏新建笔记用）
+#[tauri::command]
+fn create_new_note(filename: String) -> Result<String, String> {
+    let default_dir = get_default_notes_dir();
+    if !default_dir.exists() {
+        std::fs::create_dir_all(&default_dir)
+            .map_err(|e| format!("创建默认笔记目录失败: {}", e))?;
+    }
+    create_new_file(default_dir.to_string_lossy().to_string(), filename)
 }
 
 /// 在指定父目录下创建新的 Markdown 文件。
@@ -770,8 +911,10 @@ pub fn run() {
             save_as,
             get_document_info,
             acknowledge_flush,
-            read_dir_tree,
             create_new_file,
+            load_sidebar_stream,
+            add_workspace,
+            create_new_note,
         ])
         .setup(move |app| {
             if let Some(window) = app.get_webview_window("main") {

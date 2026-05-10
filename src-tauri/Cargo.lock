@@ -1723,6 +1723,7 @@ name = "mdx"
 version = "0.1.2"
 dependencies = [
  "chrono",
+ "dirs",
  "pulldown-cmark",
  "serde",
  "serde_json",
@@ -1730,6 +1731,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
+ "walkdir",
 ]
 
 [[package]]
