@@ -212,10 +212,15 @@ pub struct FileMeta {
     pub mtime: SystemTime,
 }
 
-/// 获取配置目录（应用数据目录）
+/// 获取配置目录（平台适配：macOS ~/Library/Application Support，Linux ~/.config，Windows AppData）
 fn get_config_dir() -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| std::env::temp_dir());
-    home.join(".config").join("mdx")
+    dirs::config_dir()
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| std::env::temp_dir())
+                .join(".config")
+        })
+        .join("mdx")
 }
 
 /// 获取配置文件路径
@@ -359,35 +364,64 @@ fn load_sidebar_stream() -> Result<Vec<FileMeta>, String> {
 }
 
 /// 添加工作区 —— 唤起文件夹选择器，将路径追加到 settings.json
+#[derive(Serialize, Clone, Debug)]
+struct AddWorkspaceResult {
+    status: String,
+    path: Option<String>,
+    message: String,
+}
+
 #[tauri::command]
-fn add_workspace(app_handle: AppHandle) -> Result<(), String> {
-    let result = app_handle
+async fn add_workspace(app_handle: AppHandle) -> Result<AddWorkspaceResult, String> {
+    // 异步命令运行在线程池上，调用 blocking_pick_folder 会阻塞当前线程
+    // 但主线程仍然空闲，可以正常处理文件对话框事件，不会死锁。
+    let file_path = app_handle
         .dialog()
         .file()
         .blocking_pick_folder();
 
-    let file_path = match result {
+    let file_path = match file_path {
         Some(p) => p,
-        None => return Err("未选择文件夹".to_string()),
+        None => return Ok(AddWorkspaceResult {
+            status: "cancelled".into(),
+            path: None,
+            message: "已取消".into(),
+        }),
     };
 
     let path = file_path.into_path()
         .map_err(|_| "无效的路径".to_string())?;
 
     if path.as_os_str().is_empty() {
-        return Err("未选择文件夹".to_string());
+        return Ok(AddWorkspaceResult {
+            status: "cancelled".into(),
+            path: None,
+            message: "未选择文件夹".into(),
+        });
     }
 
-    let path_str = path.to_string_lossy().to_string();
+    // 规范化路径，避免尾部斜杠/相对路径导致重复
+    let canonical = std::fs::canonicalize(&path)
+        .map_err(|e| format!("无法访问文件夹: {}", e))?;
+    let path_str = canonical.to_string_lossy().to_string();
 
-    // 读取现有配置，追加新路径
     let mut settings = load_settings();
-    if !settings.workspaces.contains(&path_str) {
-        settings.workspaces.push(path_str);
-        save_settings(&settings)?;
+    if settings.workspaces.contains(&path_str) {
+        return Ok(AddWorkspaceResult {
+            status: "already_exists".into(),
+            path: Some(path_str),
+            message: "该文件夹已在侧边栏中".into(),
+        });
     }
 
-    Ok(())
+    settings.workspaces.push(path_str.clone());
+    save_settings(&settings)?;
+
+    Ok(AddWorkspaceResult {
+        status: "added".into(),
+        path: Some(path_str),
+        message: "已添加文件夹".into(),
+    })
 }
 
 /// 在默认笔记目录下创建新文件（侧边栏新建笔记用）
@@ -608,31 +642,32 @@ fn save_document(
 }
 
 /// 另存为 —— 调起系统文件对话框，选择新路径后原子写入。
+/// async 命令运行在 tokio 线程池，调用 blocking_save_file 会阻塞当前线程
+/// 但主线程仍然空闲，可以正常处理文件对话框事件，不会死锁。
 #[tauri::command]
-fn save_as(
+async fn save_as(
     content: String,
-    state: tauri::State<AppState>,
+    state: tauri::State<'_, AppState>,
     app_handle: AppHandle,
-) -> SaveStatus {
+) -> Result<SaveStatus, String> {
     // 获取保存锁
     if !state.try_lock_save() {
-        return SaveStatus::Busy;
+        return Ok(SaveStatus::Busy);
     }
 
-    // 调起保存对话框（阻塞式，等待用户选择）
-    let path_result = app_handle
+    let file_path = app_handle
         .dialog()
         .file()
         .add_filter("Markdown", &["md", "markdown", "mdown"])
         .blocking_save_file();
 
-    let file_path = match path_result {
+    let file_path = match file_path {
         Some(p) => p,
         None => {
             state.unlock_save();
-            return SaveStatus::Error {
+            return Ok(SaveStatus::Error {
                 message: "未选择保存路径".to_string(),
-            };
+            });
         }
     };
 
@@ -640,17 +675,17 @@ fn save_as(
         Ok(p) => p,
         Err(_) => {
             state.unlock_save();
-            return SaveStatus::Error {
+            return Ok(SaveStatus::Error {
                 message: "无效的文件路径".to_string(),
-            };
+            });
         }
     };
 
     if path.as_os_str().is_empty() {
         state.unlock_save();
-        return SaveStatus::Error {
+        return Ok(SaveStatus::Error {
             message: "未选择保存路径".to_string(),
-        };
+        });
     }
 
     // 原子写入
@@ -660,14 +695,14 @@ fn save_as(
             *state.last_modified_time.lock().unwrap() = new_mtime;
             *state.current_file_path.lock().unwrap() = Some(path.clone());
             state.unlock_save();
-            SaveStatus::Saved {
+            Ok(SaveStatus::Saved {
                 path: path.to_string_lossy().to_string(),
                 timestamp: new_mtime.map(fmt_time).unwrap_or_default(),
-            }
+            })
         }
         Err(e) => {
             state.unlock_save();
-            SaveStatus::Error { message: e }
+            Ok(SaveStatus::Error { message: e })
         }
     }
 }
@@ -711,9 +746,12 @@ fn highlight_code_to_html(language: &str, code: &str) -> String {
         syntect::html::ClassStyle::SpacedPrefixed { prefix: "syn-" },
     );
 
+    let mut line_buf = String::new();
     for line in code.lines() {
-        let line_with_nl = format!("{}\n", line);
-        let _ = html_generator.parse_html_for_line_which_includes_newline(&line_with_nl);
+        line_buf.clear();
+        line_buf.push_str(line);
+        line_buf.push('\n');
+        let _ = html_generator.parse_html_for_line_which_includes_newline(&line_buf);
     }
 
     html_generator.finalize()
