@@ -3,7 +3,7 @@
 // We construct LanguageSupport directly from @lezer/markdown + @codemirror/language,
 // and add custom extensions for: ==highlight==, $math$, $$block math$$, [^footnote].
 
-import { parser, GFM } from "./vendor/@lezer/markdown@^1.0.0.js";
+import { parser, GFM } from "@lezer/markdown";
 import {
   Language,
   LanguageSupport,
@@ -11,8 +11,8 @@ import {
   languageDataProp,
   foldNodeProp,
   indentNodeProp,
-} from "./vendor/@codemirror/language.js";
-import { NodeProp } from "./vendor/@lezer/common@^1.0.0.js";
+} from "@codemirror/language";
+import { NodeProp } from "@lezer/common";
 
 const data = defineLanguageFacet({
   commentTokens: { block: { open: "<!--", close: "-->" } },

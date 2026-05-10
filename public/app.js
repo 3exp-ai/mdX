@@ -1,7 +1,10 @@
 // =============================================================
 // Markdown 编辑器 —— 基于 CodeMirror 6 的混合渲染实现
 // Tauri 桌面版:支持双击打开文件、Ctrl+S 保存
+// 数据预注:window.__INITIAL_MD_CONTENT__ 由 Rust 端在 setup 时注入
 // =============================================================
+
+console.log("预注数据:", window.__INITIAL_MD_CONTENT__);
 
 import {
   EditorView,
@@ -9,14 +12,14 @@ import {
   Decoration,
   keymap,
   drawSelection,
-} from "./vendor/@codemirror/view.js";
-import { EditorState } from "./vendor/@codemirror/state.js";
-import { syntaxTree } from "./vendor/@codemirror/language.js";
+} from "@codemirror/view";
+import { EditorState } from "@codemirror/state";
+import { syntaxTree } from "@codemirror/language";
 import {
   defaultKeymap,
   history,
   historyKeymap,
-} from "./vendor/@codemirror/commands.js";
+} from "@codemirror/commands";
 import { markdownSlim, markdownLanguage } from "./markdown-slim.js";
 
 // =============================================================
@@ -466,7 +469,11 @@ const dirtyTracker = ViewPlugin.fromClass(
 // =============================================================
 // 初始文档
 // =============================================================
-const initialDoc = `# 欢迎使用 mdX
+const initialDoc =
+  typeof window.__INITIAL_MD_CONTENT__ === "string" &&
+  window.__INITIAL_MD_CONTENT__.length > 0
+    ? window.__INITIAL_MD_CONTENT__
+    : `# 欢迎使用 mdX
 
 这是一个**沉浸式**的本地 Markdown 编辑器。
 

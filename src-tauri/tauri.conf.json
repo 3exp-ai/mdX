@@ -16,7 +16,12 @@
         "width": 1200,
         "height": 800,
         "center": true,
-        "resizable": true
+        "resizable": true,
+        "transparent": false,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "visible": true,
+        "backgroundColor": "#1a1a1a"
       }
     ],
     "security": {
