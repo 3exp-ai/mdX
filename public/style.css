@@ -332,3 +332,56 @@ html, body {
   z-index: 100;
   font-family: ui-monospace, Menlo, Consolas, monospace;
 }
+
+/* ============================================================
+   Syntect 语法高亮 —— 暗色主题配色
+   类名由 Rust syntect 生成，前缀为 syn-，格式为:
+   syn-<scope1> syn-<scope2> ... syn-<language>
+   使用 [class*="syn-xxx"] 属性选择器匹配包含特定 scope 的元素
+   ============================================================ */
+
+/* 关键字: fn, let, mut, if, else, return, use, pub, etc. */
+#preview [class*="syn-keyword"] { color: #ff7b72; }
+
+/* 存储类型: fn, struct, enum, trait, impl, type, let, const, static */
+#preview [class*="syn-storage"] { color: #ff7b72; }
+
+/* 字符串 */
+#preview [class*="syn-string"] { color: #a5d6ff; }
+
+/* 注释 */
+#preview [class*="syn-comment"] { color: #8b949e; font-style: italic; }
+
+/* 数字常量 */
+#preview [class*="syn-constant"] { color: #79c0ff; }
+
+/* 实体名称: 函数名、变量名、类型名 */
+#preview [class*="syn-entity"] { color: #d2a8ff; }
+
+/* 类型名 (class/struct/enum 名) */
+#preview [class*="syn-entity"][class*="syn-type"] { color: #ffa657; }
+
+/* 函数名 */
+#preview [class*="syn-entity"][class*="syn-function"] { color: #d2a8ff; }
+
+/* HTML/XML 标签名 */
+#preview [class*="syn-entity"][class*="syn-tag"] { color: #7ee787; }
+
+/* 变量 */
+#preview [class*="syn-variable"] { color: #e6edf3; }
+
+/* 内置支持: println!, vec!, 宏等 */
+#preview [class*="syn-support"] { color: #79c0ff; }
+#preview [class*="syn-support"][class*="syn-macro"] { color: #79c0ff; }
+
+/* 无效/错误 */
+#preview [class*="syn-invalid"] { color: #f85149; text-decoration: underline; }
+
+/* 标点符号: (){}[];,. */
+#preview [class*="syn-punctuation"] { color: #c9d1d9; }
+
+/* 运算符: + - * / = == > < */
+#preview [class*="syn-keyword"][class*="syn-operator"] { color: #ff7b72; }
+
+/* 语言标识符后缀 (如 syn-rust, syn-js) —— 默认文本色 */
+#preview [class*="syn-source"] { color: #e6edf3; }

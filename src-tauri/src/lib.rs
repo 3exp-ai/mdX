@@ -1,4 +1,47 @@
 use tauri::{Manager, WebviewWindow};
+use std::sync::OnceLock;
+
+// =============================================================
+// Syntect 全局实例 —— 惰性初始化，只加载一次语法定义和主题
+// =============================================================
+static SYNTAX_SET: OnceLock<syntect::parsing::SyntaxSet> = OnceLock::new();
+fn syntax_set() -> &'static syntect::parsing::SyntaxSet {
+    SYNTAX_SET.get_or_init(syntect::parsing::SyntaxSet::load_defaults_newlines)
+}
+
+/// 将代码文本高亮为带 CSS 类名的 HTML。
+/// language: 语言标识符 (如 "rust", "js", "python")
+/// code: 原始代码文本（含换行）
+/// 返回: 带 <span class="syn-..."> 的 HTML 字符串，保留换行格式
+///
+/// 使用 CSS 类而非内联样式，让前端主题完全控制颜色。
+fn highlight_code_to_html(language: &str, code: &str) -> String {
+    let ss = syntax_set();
+
+    // 根据语言标识符查找语法定义
+    let syntax = ss.find_syntax_by_token(language)
+        .or_else(|| ss.find_syntax_by_name(language))
+        .or_else(|| ss.find_syntax_by_extension(language))
+        .unwrap_or_else(|| ss.find_syntax_plain_text());
+
+    // ClassedHTMLGenerator 生成带 scope 类名的 HTML
+    // 类名如: syn-source, syn-keyword, syn-string, syn-comment 等
+    let mut html_generator = syntect::html::ClassedHTMLGenerator::new_with_class_style(
+        syntax,
+        ss,
+        syntect::html::ClassStyle::SpacedPrefixed { prefix: "syn-" },
+    );
+
+    // 逐行解析（syntect 需要包含换行符的行）
+    for line in code.lines() {
+        // parse_html_for_line_which_includes_newline 要求行包含 \n
+        // 但 lines() 已经去掉了 \n，所以手动追加
+        let line_with_nl = format!("{}\n", line);
+        let _ = html_generator.parse_html_for_line(&line_with_nl);
+    }
+
+    html_generator.finalize()
+}
 
 #[tauri::command]
 fn read_file(path: String) -> Result<String, String> {
@@ -36,39 +79,56 @@ fn set_window_title(title: String, window: WebviewWindow) {
 /// pulldown-cmark 的 Parser 是零拷贝迭代器：输入文本以借用的方式贯穿解析全程，
 /// 仅在最终写入输出 String 时发生一次必要的内存分配。
 ///
+/// 代码块高亮: 通过 syntect 在 Rust 侧完成，前端零成本。
+///
 /// 性能特征:
 /// - 10万字符文档解析耗时 < 5ms (Release 模式)
 /// - 内存分配: 仅输出 String 一次分配 + 少量栈上状态
 #[tauri::command]
 fn parse_markdown_to_html(content: String) -> String {
-    use pulldown_cmark::{Parser, Event, Tag};
+    use pulldown_cmark::{Parser, Event, Tag, CodeBlockKind};
 
-    // 预分配容量: 经验上 HTML 输出约为输入的 1.3~1.5 倍
     let mut html = String::with_capacity(content.len() * 3 / 2);
     let parser = Parser::new(&content);
 
-    // 用栈追踪当前打开的标签，用于正确输出闭合标签
-    // 注意: Tag<'a> 的生命周期与 parser 绑定，不能存 'static
     let mut tag_stack: Vec<String> = Vec::new();
+    // 追踪当前是否在代码块内，以及语言标识符
+    let mut in_code_block: Option<String> = None;
+    let mut code_buffer: String = String::new();
 
     for event in parser {
         match event {
             Event::Start(tag) => {
                 let name = tag_name_str(&tag);
                 tag_stack.push(name.to_string());
+
+                // 检测代码块开始，记录语言标识符
+                if let Tag::CodeBlock(CodeBlockKind::Fenced(lang)) = &tag {
+                    in_code_block = Some(lang.to_string());
+                    code_buffer.clear();
+                }
+
                 html.push('<');
                 html.push_str(name);
-                // 注入 mdx-* 类名
                 if let Some(cls) = tag_to_class(&tag) {
                     html.push_str(" class=\"");
                     html.push_str(cls);
                     html.push('"');
                 }
-                // 附加 Link/Image 的属性
                 append_tag_attrs(&tag, &mut html);
                 html.push('>');
             }
-            Event::End(_) => {
+            Event::End(_tag_end) => {
+                // 代码块结束: 用 syntect 高亮缓冲区内容
+                // TagEnd 不携带语言信息，语言在 Start 时已记录到 in_code_block
+                if in_code_block.is_some() {
+                    if let Some(lang) = in_code_block.take() {
+                        let highlighted = highlight_code_to_html(&lang, &code_buffer);
+                        html.push_str(&highlighted);
+                        code_buffer.clear();
+                    }
+                }
+
                 if let Some(name) = tag_stack.pop() {
                     html.push_str("</");
                     html.push_str(&name);
@@ -76,7 +136,12 @@ fn parse_markdown_to_html(content: String) -> String {
                 }
             }
             Event::Text(text) => {
-                escape_html_into(&text, &mut html);
+                // 如果在代码块内，累积到缓冲区（稍后统一高亮）
+                if in_code_block.is_some() {
+                    code_buffer.push_str(&text);
+                } else {
+                    escape_html_into(&text, &mut html);
+                }
             }
             Event::Code(code) => {
                 html.push_str("<code class=\"mdx-code\">");
@@ -87,7 +152,11 @@ fn parse_markdown_to_html(content: String) -> String {
                 html.push_str(&raw);
             }
             Event::SoftBreak => {
-                html.push('\n');
+                if in_code_block.is_some() {
+                    code_buffer.push('\n');
+                } else {
+                    html.push('\n');
+                }
             }
             Event::HardBreak => {
                 html.push_str("<br class=\"mdx-br\">");
