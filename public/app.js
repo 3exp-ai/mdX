@@ -1,18 +1,17 @@
 // =============================================================
-// mdX 前端 —— 左右分屏双栏编辑器
+// mdX 前端 —— 左右分屏双栏编辑器 + 懒加载文件树
 // 架构原则: Fat Rust, Thin UI
 //   - 左侧: CodeMirror 6 纯文本编辑区，只负责捕获输入
 //   - 右侧: HTML 预览区，Rust 解析后的渲染结果直接注入
+//   - 左侧边栏: 懒加载文件树，只读一层，点击展开
 //   - Rust 负责: 所有文件 IO、状态管理、冲突检测、原子写入
 //
-// 核心机制: 防抖全量通信 + 滚动同步 + 双轨保存引擎
-//   1. 监听 CM6 updateListener，用户打字停顿时触发 IPC
-//   2. 提取编辑器全量文本，发给 Rust parse_markdown_to_html
-//   3. Rust 用 pulldown-cmark 零拷贝解析，返回完整 HTML
-//   4. 前端直接将 HTML 注入右侧 preview-pane (innerHTML)
-//   5. 左侧滚动时，按比例同步右侧 scrollTop，保持视角对齐
-//   6. 保存: 1000ms 防抖自动保存 + Cmd+S 手动保存 + Cmd+Shift+S 另存为
-//   7. 退出: 拦截 CloseRequested，flush 保存后再关闭
+// 核心机制:
+//   1. CM6 updateListener → 防抖 IPC → Rust 解析 → innerHTML 注入
+//   2. 双轨保存: 1000ms 自动保存 + Cmd+S 手动 + Cmd+Shift+S 另存为
+//   3. 文件切换: setState 彻底重置 CM6，防止跨文件撤销
+//   4. 懒加载树: 点击文件夹 → invoke read_dir_tree → 挂载子节点
+//   5. 退出拦截: CloseRequested → flush 保存 → 关闭
 // =============================================================
 
 console.log("预注数据:", window.__INITIAL_MD_CONTENT__);
@@ -45,19 +44,52 @@ if (isTauri) {
 // =============================================================
 // 全局保存锁与状态
 // =============================================================
-let isSaving = false;        // 保存锁：防止并发 IPC 请求
-let saveStatus = "idle";     // idle | saving | saved | conflict | draft | error
-let isDirty = false;         // 文档是否被修改过
-let isLoadingFile = false;   // 是否正在加载文件（避免触发脏状态）
+let isSaving = false;
+let saveStatus = "idle";
+let isDirty = false;
+let isLoadingFile = false;
 let autoSaveTimer = null;
 const AUTO_SAVE_DELAY = 1000;
 
-// 从 Rust 同步的文档信息
-let docInfo = {
-  path: null,
-  isDraft: true,
-  lastSaved: null,
-};
+let docInfo = { path: null, isDraft: true, lastSaved: null };
+
+// 当前活跃的文件路径（用于侧边栏高亮）
+let activeFilePath = null;
+
+// =============================================================
+// CM6 扩展配置 —— 可复用的基础配置
+// =============================================================
+const cmExtensions = [
+  history(),
+  keymap.of([...defaultKeymap, ...historyKeymap]),
+  drawSelection(),
+  EditorView.lineWrapping,
+  EditorView.theme({
+    ".cm-content": {
+      padding: "60px 28px 30vh",
+      fontFamily: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace",
+      fontSize: "15px",
+      lineHeight: "1.75",
+      color: "var(--text)",
+      caretColor: "var(--accent)",
+    },
+    ".cm-line": { padding: "0 2px" },
+  }),
+];
+
+// 脏状态追踪插件
+const dirtyTracker = ViewPlugin.fromClass(
+  class {
+    update(update) {
+      if (update.docChanged && !isLoadingFile) {
+        isDirty = true;
+        updateTitle();
+        scheduleAutoSave();
+        triggerPreviewRender();
+      }
+    }
+  }
+);
 
 // =============================================================
 // 状态栏更新
@@ -66,43 +98,25 @@ function updateStatusBar(status, detail = null) {
   const bar = document.getElementById("status-bar");
   const text = document.getElementById("status-text");
   if (!bar || !text) return;
-
   saveStatus = status;
-  bar.className = ""; // 清除旧状态类
+  bar.className = "";
   bar.classList.add(status);
-
   switch (status) {
-    case "saving":
-      text.textContent = "保存中...";
-      break;
+    case "saving": text.textContent = "保存中..."; break;
     case "saved":
       text.textContent = detail ? `已保存 ${detail}` : "已保存";
-      // 2秒后淡出为灰色
       setTimeout(() => {
-        if (saveStatus === "saved") {
-          bar.classList.remove("saved");
-          bar.classList.add("idle");
-        }
+        if (saveStatus === "saved") { bar.classList.remove("saved"); bar.classList.add("idle"); }
       }, 2000);
       break;
-    case "draft":
-      text.textContent = "草稿模式 — Cmd+Shift+S 另存为";
-      break;
-    case "conflict":
-      text.textContent = "⚠️ 外部修改冲突 — 请另存为或强制覆盖";
-      break;
-    case "error":
-      text.textContent = detail ? `保存失败: ${detail}` : "保存失败";
-      break;
-    case "busy":
-      text.textContent = "保存进行中...";
-      break;
+    case "draft": text.textContent = "草稿模式 — Cmd+Shift+S 另存为"; break;
+    case "conflict": text.textContent = "⚠️ 外部修改冲突 — 请另存为或强制覆盖"; break;
+    case "error": text.textContent = detail ? `保存失败: ${detail}` : "保存失败"; break;
+    case "busy": text.textContent = "保存进行中..."; break;
     default:
       text.textContent = docInfo.isDraft
         ? "草稿模式 — Cmd+Shift+S 另存为"
-        : docInfo.lastSaved
-        ? `已保存 ${docInfo.lastSaved}`
-        : "";
+        : docInfo.lastSaved ? `已保存 ${docInfo.lastSaved}` : "";
   }
 }
 
@@ -113,18 +127,12 @@ async function syncDocumentInfo() {
   if (!invoke) return;
   try {
     const info = await invoke("get_document_info");
-    docInfo = {
-      path: info.path || null,
-      isDraft: info.is_draft,
-      lastSaved: info.last_saved || null,
-    };
+    docInfo = { path: info.path || null, isDraft: info.is_draft, lastSaved: info.last_saved || null };
+    activeFilePath = docInfo.path;
     updateTitle();
-    if (docInfo.isDraft) {
-      updateStatusBar("draft");
-    }
-  } catch (e) {
-    console.error("Sync doc info failed:", e);
-  }
+    highlightSidebarActive();
+    if (docInfo.isDraft) updateStatusBar("draft");
+  } catch (e) { console.error("Sync doc info failed:", e); }
 }
 
 // =============================================================
@@ -133,74 +141,44 @@ async function syncDocumentInfo() {
 let lastTitle = "";
 function updateTitle(force = false) {
   if (!invoke) return;
-  const name = docInfo.path
-    ? docInfo.path.split(/[\\/]/).pop()
-    : "未命名";
+  const name = docInfo.path ? docInfo.path.split(/[\\/]/).pop() : "未命名";
   const dirtyMark = isDirty ? " *" : "";
   const title = `${name}${dirtyMark} - mdX`;
-  if (force || title !== lastTitle) {
-    invoke("set_window_title", { title });
-    lastTitle = title;
-  }
+  if (force || title !== lastTitle) { invoke("set_window_title", { title }); lastTitle = title; }
 }
 
 // =============================================================
-// 核心保存函数 —— 带锁的防弹保存
+// 核心保存函数
 // =============================================================
 async function performSave({ force = false, isAuto = false } = {}) {
   if (!invoke) return;
-
-  // 保存锁：如果已有保存请求在处理中，拦截后续请求
-  if (isSaving) {
-    if (!isAuto) updateStatusBar("busy");
-    return;
-  }
-
+  if (isSaving) { if (!isAuto) updateStatusBar("busy"); return; }
   const view = window.editorView;
   if (!view) return;
   const content = view.state.doc.toString();
-
-  // 草稿模式下自动保存不触发（避免频繁提示）
-  if (docInfo.isDraft && isAuto && !force) {
-    updateStatusBar("draft");
-    return;
-  }
-
+  if (docInfo.isDraft && isAuto && !force) { updateStatusBar("draft"); return; }
   isSaving = true;
   updateStatusBar("saving");
-
   try {
     const result = await invoke("save_document", { content, force });
-
     switch (result.status) {
       case "Saved":
         isDirty = false;
         docInfo.path = result.path;
         docInfo.isDraft = false;
         docInfo.lastSaved = result.timestamp;
+        activeFilePath = result.path;
         updateTitle();
         updateStatusBar("saved", result.timestamp);
+        highlightSidebarActive();
         break;
-      case "Conflict":
-        updateStatusBar("conflict");
-        // 冲突时保持 dirty 状态
-        break;
-      case "Draft":
-        updateStatusBar("draft");
-        break;
-      case "Busy":
-        updateStatusBar("busy");
-        break;
-      case "Error":
-        updateStatusBar("error", result.message);
-        break;
+      case "Conflict": updateStatusBar("conflict"); break;
+      case "Draft": updateStatusBar("draft"); break;
+      case "Busy": updateStatusBar("busy"); break;
+      case "Error": updateStatusBar("error", result.message); break;
     }
-  } catch (e) {
-    console.error("Save failed:", e);
-    updateStatusBar("error", e.toString());
-  } finally {
-    isSaving = false;
-  }
+  } catch (e) { console.error("Save failed:", e); updateStatusBar("error", e.toString()); }
+  finally { isSaving = false; }
 }
 
 // =============================================================
@@ -208,18 +186,12 @@ async function performSave({ force = false, isAuto = false } = {}) {
 // =============================================================
 async function performSaveAs() {
   if (!invoke) return;
-  if (isSaving) {
-    updateStatusBar("busy");
-    return;
-  }
-
+  if (isSaving) { updateStatusBar("busy"); return; }
   const view = window.editorView;
   if (!view) return;
   const content = view.state.doc.toString();
-
   isSaving = true;
   updateStatusBar("saving");
-
   try {
     const result = await invoke("save_as", { content });
     switch (result.status) {
@@ -228,22 +200,17 @@ async function performSaveAs() {
         docInfo.path = result.path;
         docInfo.isDraft = false;
         docInfo.lastSaved = result.timestamp;
+        activeFilePath = result.path;
         updateTitle();
         updateStatusBar("saved", result.timestamp);
+        highlightSidebarActive();
+        refreshSidebarTree();
         break;
-      case "Error":
-        updateStatusBar("error", result.message);
-        break;
-      case "Busy":
-        updateStatusBar("busy");
-        break;
+      case "Error": updateStatusBar("error", result.message); break;
+      case "Busy": updateStatusBar("busy"); break;
     }
-  } catch (e) {
-    console.error("Save as failed:", e);
-    updateStatusBar("error", e.toString());
-  } finally {
-    isSaving = false;
-  }
+  } catch (e) { console.error("Save as failed:", e); updateStatusBar("error", e.toString()); }
+  finally { isSaving = false; }
 }
 
 // =============================================================
@@ -258,46 +225,73 @@ function scheduleAutoSave() {
 }
 
 // =============================================================
-// 加载文件
+// 安全文件切换 —— CM6 setState 彻底重置
+//
+// 关键：禁止用 view.dispatch({changes:...}) 切换文件！
+// 因为 dispatch 会保留 undo 历史，用户 Cmd+Z 会撤销到上一个文件。
+// 正确做法：EditorState.create() 全新状态 + view.setState() 整体替换。
 // =============================================================
-async function loadFileFromPath(path) {
+async function switchToFile(path) {
   if (!invoke || !path) return false;
+
+  // 1. 如果有未保存的修改，先保存当前文件
+  if (isDirty && docInfo.path) {
+    await performSave({ force: true });
+  }
+
   try {
     isLoadingFile = true;
     const content = await invoke("read_file", { path });
-    const view = window.editorView;
-    view.dispatch({
-      changes: { from: 0, to: view.state.doc.length, insert: content },
+
+    // 2. 用 EditorState.create() 创建全新状态
+    //    不保留任何历史、选择、undo/redo 栈
+    const newState = EditorState.create({
+      doc: content,
       selection: { anchor: 0, head: 0 },
+      extensions: [...cmExtensions, dirtyTracker],
     });
-    isDirty = false;
-    updateTitle();
-    isLoadingFile = false;
-    // 同步 Rust 状态
+
+    // 3. 用 setState() 彻底替换，旧状态完全销毁
+    const view = window.editorView;
+    view.setState(newState);
+
+    // 4. 同步 Rust 状态
     await syncDocumentInfo();
-    // 加载后触发预览
+
+    isDirty = false;
+    isLoadingFile = false;
+    activeFilePath = path;
+    highlightSidebarActive();
+    updateTitle();
     triggerPreviewRender();
     return true;
   } catch (e) {
     isLoadingFile = false;
-    console.error("Failed to read file:", e);
+    console.error("Failed to switch file:", e);
     return false;
   }
 }
 
+// 保留旧函数名用于 CLI 加载
+async function loadFileFromPath(path) {
+  return switchToFile(path);
+}
+
 // =============================================================
-// 初始化：同步文档信息 + 加载 CLI 文件
+// 初始化
 // =============================================================
 if (isTauri) {
   (async () => {
     await syncDocumentInfo();
     const path = await invoke("get_cli_file");
     if (path) {
-      await loadFileFromPath(path);
+      await switchToFile(path);
     } else {
       updateTitle();
       if (docInfo.isDraft) updateStatusBar("draft");
     }
+    // 初始化侧边栏
+    initSidebar();
   })();
 }
 
@@ -309,19 +303,14 @@ if (isTauri) {
     const meta = e.ctrlKey || e.metaKey;
     if (meta && e.key === "s") {
       e.preventDefault();
-      if (e.shiftKey) {
-        // Cmd+Shift+S → 另存为
-        await performSaveAs();
-      } else {
-        // Cmd+S → 保存（强制覆盖冲突）
-        await performSave({ force: true });
-      }
+      if (e.shiftKey) await performSaveAs();
+      else await performSave({ force: true });
     }
   });
 }
 
 // =============================================================
-// 优雅退出监听 —— Rust 发来 req-flush-save 时执行最终保存
+// 优雅退出监听
 // =============================================================
 if (isTauri && tauriEvent) {
   tauriEvent.listen("req-flush-save", async () => {
@@ -335,16 +324,14 @@ if (isTauri && tauriEvent) {
       await invoke("acknowledge_flush");
     } catch (e) {
       console.error("[Exit] Flush save failed:", e);
-      // 即使失败也通知 Rust 关闭，避免窗口卡死
       await invoke("acknowledge_flush");
     }
   });
 }
 
 // =============================================================
-// 核心: 防抖预览渲染 + 滚动同步
+// 预览渲染
 // =============================================================
-
 let previewDebounceTimer = null;
 const PREVIEW_DEBOUNCE_MS = 200;
 let previewInFlight = false;
@@ -370,9 +357,8 @@ async function flushPreviewRender() {
     const html = await invoke("parse_markdown_to_html", { content: text });
     const preview = document.getElementById("preview");
     if (preview) preview.innerHTML = html;
-  } catch (e) {
-    console.error("Preview render failed:", e);
-  } finally {
+  } catch (e) { console.error("Preview render failed:", e); }
+  finally {
     previewInFlight = false;
     if (pendingText !== null) flushPreviewRender();
   }
@@ -385,18 +371,15 @@ function setupScrollSync() {
   const editorPane = document.querySelector("#editor-pane .cm-scroller");
   const previewPane = document.getElementById("preview");
   if (!editorPane || !previewPane) return;
-
   let isEditorScrolling = false;
   let isPreviewScrolling = false;
   let syncTimer = null;
-
   function syncScroll(source, target) {
-    const sourceMax = source.scrollHeight - source.clientHeight;
-    const targetMax = target.scrollHeight - target.clientHeight;
-    if (sourceMax <= 0 || targetMax <= 0) return;
-    target.scrollTop = (source.scrollTop / sourceMax) * targetMax;
+    const sMax = source.scrollHeight - source.clientHeight;
+    const tMax = target.scrollHeight - target.clientHeight;
+    if (sMax <= 0 || tMax <= 0) return;
+    target.scrollTop = (source.scrollTop / sMax) * tMax;
   }
-
   editorPane.addEventListener("scroll", () => {
     if (isPreviewScrolling) return;
     isEditorScrolling = true;
@@ -404,7 +387,6 @@ function setupScrollSync() {
     clearTimeout(syncTimer);
     syncTimer = setTimeout(() => { isEditorScrolling = false; }, 50);
   });
-
   previewPane.addEventListener("scroll", () => {
     if (isEditorScrolling) return;
     isPreviewScrolling = true;
@@ -415,23 +397,172 @@ function setupScrollSync() {
 }
 
 // =============================================================
-// 脏状态追踪 + 预览触发 + 自动保存
+// 侧边栏: 懒加载文件树
 // =============================================================
-const dirtyTracker = ViewPlugin.fromClass(
-  class {
-    update(update) {
-      if (update.docChanged && !isLoadingFile) {
-        isDirty = true;
-        updateTitle();
-        scheduleAutoSave();
-        triggerPreviewRender();
-      }
+
+// 侧边栏根目录（默认从当前文件所在目录开始）
+let sidebarRootPath = null;
+
+function initSidebar() {
+  const newBtn = document.getElementById("sidebar-new-btn");
+  if (newBtn) {
+    newBtn.addEventListener("click", () => {
+      const parent = sidebarRootPath || "/tmp";
+      const name = window.prompt("新文件名:", "untitled.md");
+      if (name && name.trim()) createNewFile(parent, name.trim());
+    });
+  }
+  // 确定根目录
+  determineSidebarRoot();
+}
+
+async function determineSidebarRoot() {
+  if (!invoke) return;
+  // 优先从当前文件路径推断
+  if (docInfo.path) {
+    const parts = docInfo.path.split(/[\\/]/);
+    parts.pop(); // 去掉文件名
+    sidebarRootPath = parts.join("/");
+  } else {
+    // 草稿模式：用临时目录
+    sidebarRootPath = "/tmp";
+  }
+  await renderSidebarTree(sidebarRootPath, document.getElementById("sidebar-tree"));
+}
+
+// 渲染指定路径下的直接子节点到容器
+async function renderSidebarTree(dirPath, container, level = 0) {
+  if (!invoke || !container) return;
+  container.innerHTML = "";
+  try {
+    const nodes = await invoke("read_dir_tree", { targetPath: dirPath });
+    for (const node of nodes) {
+      const el = createSidebarNode(node, level);
+      container.appendChild(el);
+    }
+  } catch (e) {
+    console.error("Read dir failed:", e);
+    container.innerHTML = `<div style="padding:10px 14px;color:var(--muted);font-size:12px;">无法读取目录</div>`;
+  }
+}
+
+// 创建单个树节点 DOM
+function createSidebarNode(node, level) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "sidebar-node-wrapper";
+  wrapper.dataset.path = node.path;
+  wrapper.dataset.isDir = node.is_dir;
+
+  const row = document.createElement("div");
+  row.className = `sidebar-node ${node.is_dir ? "dir" : "file"}`;
+  row.style.paddingLeft = `${14 + level * 12}px`;
+  row.title = node.path;
+
+  // 图标
+  const icon = document.createElement("span");
+  icon.className = "icon";
+  row.appendChild(icon);
+
+  // 名称
+  const name = document.createElement("span");
+  name.className = "name";
+  name.textContent = node.name;
+  row.appendChild(name);
+
+  wrapper.appendChild(row);
+
+  // 高亮当前活跃文件
+  if (!node.is_dir && node.path === activeFilePath) {
+    row.classList.add("active");
+  }
+
+  // 点击事件
+  row.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    if (node.is_dir) {
+      // 文件夹：展开/折叠
+      toggleSidebarDir(wrapper, node.path, level);
+    } else {
+      // 文件：安全切换
+      await switchToFile(node.path);
+    }
+  });
+
+  // 子节点容器（初始折叠）
+  if (node.is_dir) {
+    const childrenContainer = document.createElement("div");
+    childrenContainer.className = "sidebar-children collapsed";
+    wrapper.appendChild(childrenContainer);
+  }
+
+  return wrapper;
+}
+
+// 展开/折叠文件夹
+async function toggleSidebarDir(wrapper, dirPath, level) {
+  const row = wrapper.querySelector(".sidebar-node");
+  const children = wrapper.querySelector(".sidebar-children");
+  if (!children) return;
+
+  const isExpanded = row.classList.contains("expanded");
+
+  if (isExpanded) {
+    // 折叠
+    row.classList.remove("expanded");
+    children.classList.add("collapsed");
+  } else {
+    // 展开：如果子节点为空，懒加载
+    if (children.children.length === 0) {
+      await renderSidebarTree(dirPath, children, level + 1);
+    }
+    row.classList.add("expanded");
+    children.classList.remove("collapsed");
+  }
+}
+
+// 高亮当前活跃文件
+function highlightSidebarActive() {
+  document.querySelectorAll(".sidebar-node").forEach((el) => {
+    el.classList.remove("active");
+  });
+  if (!activeFilePath) return;
+  const wrappers = document.querySelectorAll(".sidebar-node-wrapper");
+  for (const w of wrappers) {
+    if (w.dataset.path === activeFilePath && w.dataset.isDir === "false") {
+      const row = w.querySelector(".sidebar-node");
+      if (row) row.classList.add("active");
+      break;
     }
   }
-);
+}
+
+// 新建文件
+async function createNewFile(parentPath, filename) {
+  if (!invoke) return;
+  try {
+    const newPath = await invoke("create_new_file", {
+      parentPath,
+      filename,
+    });
+    console.log("Created:", newPath);
+    // 刷新侧边栏
+    refreshSidebarTree();
+    // 自动切换到新文件
+    await switchToFile(newPath);
+  } catch (e) {
+    alert("创建文件失败: " + e);
+  }
+}
+
+// 刷新侧边栏（重新加载根目录）
+async function refreshSidebarTree() {
+  if (sidebarRootPath) {
+    await renderSidebarTree(sidebarRootPath, document.getElementById("sidebar-tree"));
+  }
+}
 
 // =============================================================
-// 初始文档
+// 挂载 EditorView
 // =============================================================
 const initialDoc =
   typeof window.__INITIAL_MD_CONTENT__ === "string" &&
@@ -465,37 +596,12 @@ fn main() {
 开始写作吧。
 `;
 
-// =============================================================
-// 组装 EditorState
-// =============================================================
 const startState = EditorState.create({
   doc: initialDoc,
   selection: { anchor: initialDoc.length, head: initialDoc.length },
-  extensions: [
-    history(),
-    keymap.of([...defaultKeymap, ...historyKeymap]),
-    drawSelection(),
-    EditorView.lineWrapping,
-    dirtyTracker,
-    EditorView.theme({
-      ".cm-content": {
-        padding: "60px 28px 30vh",
-        fontFamily: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace",
-        fontSize: "15px",
-        lineHeight: "1.75",
-        color: "var(--text)",
-        caretColor: "var(--accent)",
-      },
-      ".cm-line": {
-        padding: "0 2px",
-      },
-    }),
-  ],
+  extensions: [...cmExtensions, dirtyTracker],
 });
 
-// =============================================================
-// 挂载 EditorView
-// =============================================================
 const view = new EditorView({
   state: startState,
   parent: document.getElementById("editor"),

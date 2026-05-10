@@ -187,6 +187,129 @@ fn get_cli_file() -> Option<String> {
     }).cloned()
 }
 
+// =============================================================
+// 文件树节点 —— 懒加载只返回直接子节点
+// =============================================================
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct DirNode {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+}
+
+/// 读取目录的直接子节点（只读一层，绝不递归）。
+///
+/// 过滤规则:
+///   - 跳过以 `.` 开头的隐藏文件/目录
+///   - 文件只保留 `.md` / `.markdown` / `.mdown` 后缀
+///   - 目录无后缀限制
+#[tauri::command]
+fn read_dir_tree(target_path: String) -> Result<Vec<DirNode>, String> {
+    let path = std::path::Path::new(&target_path);
+    let mut nodes = Vec::new();
+
+    let entries = std::fs::read_dir(path).map_err(|e| format!("读取目录失败: {}", e))?;
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        // 跳过隐藏文件/目录
+        if name_str.starts_with('.') {
+            continue;
+        }
+
+        let metadata = entry.metadata().ok();
+        let is_dir = metadata.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+        let entry_path = entry.path();
+        let path_str = entry_path.to_string_lossy().to_string();
+
+        if is_dir {
+            // 目录：无条件保留
+            nodes.push(DirNode {
+                name: name_str.to_string(),
+                path: path_str,
+                is_dir: true,
+            });
+        } else {
+            // 文件：只保留 Markdown 后缀
+            let ext = entry_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_lowercase());
+            let is_md = matches!(ext.as_deref(), Some("md") | Some("markdown") | Some("mdown"));
+            if is_md {
+                nodes.push(DirNode {
+                    name: name_str.to_string(),
+                    path: path_str,
+                    is_dir: false,
+                });
+            }
+        }
+    }
+
+    // 排序：目录在前，文件在后，各自按名称字母序
+    nodes.sort_by(|a, b| {
+        match (a.is_dir, b.is_dir) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        }
+    });
+
+    Ok(nodes)
+}
+
+/// 在指定父目录下创建新的 Markdown 文件。
+/// 如果文件名不含 `.md` 后缀，自动补齐。
+#[tauri::command]
+fn create_new_file(parent_path: String, filename: String) -> Result<String, String> {
+    let parent = std::path::Path::new(&parent_path);
+    let mut name = filename.trim().to_string();
+
+    // 自动补齐 .md 后缀
+    let lower = name.to_lowercase();
+    if !lower.ends_with(".md") && !lower.ends_with(".markdown") && !lower.ends_with(".mdown") {
+        name.push_str(".md");
+    }
+
+    // 清理非法字符（基础防护）
+    let safe_name: String = name
+        .chars()
+        .filter(|c| !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+        .collect();
+
+    if safe_name.is_empty() {
+        return Err("文件名不能为空".to_string());
+    }
+
+    let file_path = parent.join(&safe_name);
+
+    // 如果文件已存在，追加数字后缀
+    let final_path = if file_path.exists() {
+        let stem = file_path.file_stem().unwrap_or_default().to_string_lossy();
+        let ext = file_path.extension().unwrap_or_default().to_string_lossy();
+        let mut counter = 1;
+        loop {
+            let candidate = parent.join(format!("{}_{}.{}", stem, counter, ext));
+            if !candidate.exists() {
+                break candidate;
+            }
+            counter += 1;
+            if counter > 999 {
+                return Err("无法生成唯一文件名".to_string());
+            }
+        }
+    } else {
+        file_path
+    };
+
+    std::fs::write(&final_path, "")
+        .map_err(|e| format!("创建文件失败: {}", e))?;
+
+    Ok(final_path.to_string_lossy().to_string())
+}
+
 /// 设置窗口标题
 #[tauri::command]
 fn set_window_title(title: String, window: WebviewWindow) {
@@ -647,6 +770,8 @@ pub fn run() {
             save_as,
             get_document_info,
             acknowledge_flush,
+            read_dir_tree,
+            create_new_file,
         ])
         .setup(move |app| {
             if let Some(window) = app.get_webview_window("main") {
