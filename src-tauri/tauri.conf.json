@@ -8,7 +8,6 @@
     "devUrl": "http://localhost:8080"
   },
   "app": {
-    "withGlobalTauri": true,
     "windows": [
       {
         "label": "main",
@@ -19,13 +18,13 @@
         "resizable": true,
         "transparent": false,
         "decorations": true,
-        "titleBarStyle": "Overlay",
+        "titleBarStyle": "Transparent",
         "visible": true,
         "backgroundColor": "#1a1a1a"
       }
     ],
     "security": {
-      "csp": null,
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'",
       "capabilities": ["default"]
     }
   },

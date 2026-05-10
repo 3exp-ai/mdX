@@ -4,16 +4,12 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>mdX</title>
-  <script>window.__t0 = performance.now();</script>
   <link rel="preload" href="app.bundle.js" as="script" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <!-- 侧边栏: 扁平时间流文件列表 -->
   <div id="sidebar">
-    <div id="sidebar-header">
-      <span id="sidebar-title">笔记</span>
-    </div>
     <div id="sidebar-actions">
       <button id="sidebar-add-workspace" title="添加文件夹">+ 添加文件夹</button>
       <button id="sidebar-new-note" title="新建笔记">+ 新建笔记</button>
@@ -23,7 +19,11 @@
 
   <!-- 双栏分屏容器 -->
   <div id="split-container">
-    <div id="editor-pane"><div id="editor"></div></div>
+    <div id="editor-pane">
+      <button id="sidebar-toggle" title="折叠/展开目录">隐藏目录</button>
+      <button id="preview-toggle" title="折叠/展开预览">隐藏预览</button>
+      <div id="editor"></div>
+    </div>
     <div id="divider"></div>
     <div id="preview-pane"><div id="preview"></div></div>
   </div>

@@ -27,12 +27,12 @@ walkdir = "2.5.0"
 dirs = "6.0.0"
 
 [profile.release]
-opt-level = 1
-codegen-units = 256
-incremental = true
-lto = false
+opt-level = 2
+codegen-units = 1
+incremental = false
+lto = true
 debug = false
-strip = "none"
+strip = "symbols"
 
 [profile.release.package."*"]
 opt-level = 2

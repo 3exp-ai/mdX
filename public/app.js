@@ -16,6 +16,9 @@
 
 console.log("预注数据:", window.__INITIAL_MD_CONTENT__);
 
+// 尽早记录启动时间戳（原 index.html 内联脚本）
+window.__t0 = performance.now();
+
 import {
   EditorView,
   keymap,
@@ -28,18 +31,13 @@ import {
   history,
   historyKeymap,
 } from "@codemirror/commands";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 // =============================================================
-// Tauri 集成层
+// Tauri 环境检测
 // =============================================================
-const isTauri = typeof window !== "undefined" && !!window.__TAURI__;
-let invoke = null;
-let tauriEvent = null;
-
-if (isTauri) {
-  invoke = window.__TAURI__.core?.invoke;
-  tauriEvent = window.__TAURI__.event;
-}
+const isTauri = typeof window !== "undefined" && !!window.__TAURI_INTERNALS__;
 
 // =============================================================
 // 全局保存锁与状态
@@ -124,7 +122,7 @@ function updateStatusBar(status, detail = null) {
 // 同步 Rust 文档信息
 // =============================================================
 async function syncDocumentInfo() {
-  if (!invoke) return;
+  if (!isTauri) return;
   try {
     const info = await invoke("get_document_info");
     docInfo = { path: info.path || null, isDraft: info.is_draft, lastSaved: info.last_saved || null };
@@ -140,7 +138,7 @@ async function syncDocumentInfo() {
 // =============================================================
 let lastTitle = "";
 function updateTitle(force = false) {
-  if (!invoke) return;
+  if (!isTauri) return;
   const name = docInfo.path ? docInfo.path.split(/[\\/]/).pop() : "未命名";
   const dirtyMark = isDirty ? " *" : "";
   const title = `${name}${dirtyMark} - mdX`;
@@ -151,7 +149,7 @@ function updateTitle(force = false) {
 // 核心保存函数
 // =============================================================
 async function performSave({ force = false, isAuto = false } = {}) {
-  if (!invoke) return;
+  if (!isTauri) return;
   if (isSaving) { if (!isAuto) updateStatusBar("busy"); return; }
   const view = window.editorView;
   if (!view) return;
@@ -186,7 +184,7 @@ async function performSave({ force = false, isAuto = false } = {}) {
 // 另存为
 // =============================================================
 async function performSaveAs() {
-  if (!invoke) return;
+  if (!isTauri) return;
   if (isSaving) { updateStatusBar("busy"); return; }
   const view = window.editorView;
   if (!view) return;
@@ -313,8 +311,8 @@ if (isTauri) {
 // =============================================================
 // 优雅退出监听
 // =============================================================
-if (isTauri && tauriEvent) {
-  tauriEvent.listen("req-flush-save", async () => {
+if (isTauri) {
+  listen("req-flush-save", async () => {
     console.log("[Exit] Received flush request from Rust");
     try {
       const view = window.editorView;
@@ -366,6 +364,22 @@ async function flushPreviewRender() {
 }
 
 // =============================================================
+// 预览区折叠/展开
+// =============================================================
+function initPreviewToggle() {
+  const btn = document.getElementById("preview-toggle");
+  const container = document.getElementById("split-container");
+  if (!btn || !container) return;
+
+  btn.addEventListener("click", () => {
+    container.classList.toggle("preview-collapsed");
+    btn.textContent = container.classList.contains("preview-collapsed")
+      ? "显示预览"
+      : "隐藏预览";
+  });
+}
+
+// =============================================================
 // 滚动同步
 // =============================================================
 function setupScrollSync() {
@@ -413,13 +427,26 @@ function initSidebar() {
   const addWsBtn = document.getElementById("sidebar-add-workspace");
   if (addWsBtn) {
     addWsBtn.addEventListener("click", async () => {
-      if (!invoke) return;
+      if (!isTauri) return;
       try {
-        await invoke("add_workspace");
-        // 添加成功后刷新列表
-        await refreshSidebarList();
+        const result = await invoke("add_workspace");
+        switch (result.status) {
+          case "added":
+            updateStatusBar("saved", result.message);
+            setTimeout(() => { if (saveStatus === "saved") updateStatusBar("idle"); }, 2500);
+            await refreshSidebarList();
+            break;
+          case "already_exists":
+            updateStatusBar("draft");
+            document.getElementById("status-text").textContent = result.message;
+            setTimeout(() => updateStatusBar("idle"), 2500);
+            break;
+          case "cancelled":
+            break;
+        }
       } catch (e) {
-        console.log("Add workspace cancelled or failed:", e);
+        updateStatusBar("error", `添加文件夹失败: ${e}`);
+        setTimeout(() => updateStatusBar("idle"), 3000);
       }
     });
   }
@@ -441,7 +468,7 @@ function initSidebar() {
 
 /// 从 Rust 加载扁平文件流并渲染
 async function refreshSidebarList() {
-  if (!invoke) return;
+  if (!isTauri) return;
   const container = document.getElementById("sidebar-list");
   if (!container) return;
 
@@ -529,9 +556,21 @@ function highlightSidebarActive() {
   }
 }
 
-/// 新建笔记（在默认笔记目录）
+/// 侧边栏折叠/展开
+function initSidebarToggle() {
+  const btn = document.getElementById("sidebar-toggle");
+  const sidebar = document.getElementById("sidebar");
+  if (!btn || !sidebar) return;
+
+  btn.addEventListener("click", () => {
+    sidebar.classList.toggle("sidebar-collapsed");
+    btn.textContent = sidebar.classList.contains("sidebar-collapsed")
+      ? "显示目录"
+      : "隐藏目录";
+  });
+}
 async function createNewNote(filename) {
-  if (!invoke) return;
+  if (!isTauri) return;
   try {
     const newPath = await invoke("create_new_note", { filename });
     console.log("Created note:", newPath);
@@ -594,6 +633,8 @@ window.editorView = view;
 
 // 初始化
 setupScrollSync();
+initPreviewToggle();
+initSidebarToggle();
 triggerPreviewRender();
 
 // 启动耗时
