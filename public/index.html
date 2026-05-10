@@ -9,30 +9,25 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <div id="editor"></div>
-  <div id="save-indicator" style="
-    position: fixed;
-    bottom: 20px;
-    right: 28px;
-    font-size: 12px;
-    color: var(--muted);
-    opacity: 0;
-    transition: opacity 0.3s;
-    pointer-events: none;
-    z-index: 100;
-  ">已保存</div>
-  <div id="boot-timing" style="
-    position: fixed;
-    bottom: 20px;
-    left: 28px;
-    font-size: 11px;
-    color: var(--muted);
-    opacity: 0;
-    transition: opacity 0.4s;
-    pointer-events: none;
-    z-index: 100;
-    font-family: ui-monospace, Menlo, Consolas, monospace;
-  "></div>
+  <!-- 双栏分屏容器 -->
+  <div id="split-container">
+    <!-- 左侧: 纯文本编辑区 (CodeMirror) -->
+    <div id="editor-pane">
+      <div id="editor"></div>
+    </div>
+    <!-- 中间: 极淡分割线 -->
+    <div id="divider"></div>
+    <!-- 右侧: 实时 HTML 预览区 -->
+    <div id="preview-pane">
+      <div id="preview"></div>
+    </div>
+  </div>
+
+  <!-- 已保存指示器 -->
+  <div id="save-indicator">已保存</div>
+  <!-- 启动耗时 -->
+  <div id="boot-timing"></div>
+
   <script src="app.bundle.js"></script>
 </body>
 </html>

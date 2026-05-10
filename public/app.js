@@ -1,26 +1,31 @@
 // =============================================================
-// Markdown 编辑器 —— 基于 CodeMirror 6 的混合渲染实现
-// Tauri 桌面版:支持双击打开文件、Ctrl+S 保存
-// 数据预注:window.__INITIAL_MD_CONTENT__ 由 Rust 端在 setup 时注入
+// mdX 前端 —— 左右分屏双栏编辑器
+// 架构原则: Fat Rust, Thin UI
+//   - 左侧: CodeMirror 6 纯文本编辑区，只负责捕获输入
+//   - 右侧: HTML 预览区，Rust 解析后的渲染结果直接注入
+//   - Rust 负责: 所有 Markdown 解析、完整 HTML 树生成
+//
+// 核心机制: 防抖全量通信 + 滚动同步
+//   1. 监听 CM6 updateListener，用户打字停顿时(200ms)触发 IPC
+//   2. 提取编辑器全量文本，发给 Rust parse_markdown_to_html
+//   3. Rust 用 pulldown-cmark 零拷贝解析，返回完整 HTML
+//   4. 前端直接将 HTML 注入右侧 preview-pane (innerHTML)
+//   5. 左侧滚动时，按比例同步右侧 scrollTop，保持视角对齐
 // =============================================================
 
 console.log("预注数据:", window.__INITIAL_MD_CONTENT__);
 
 import {
   EditorView,
-  ViewPlugin,
-  Decoration,
   keymap,
   drawSelection,
 } from "@codemirror/view";
 import { EditorState } from "@codemirror/state";
-import { syntaxTree } from "@codemirror/language";
 import {
   defaultKeymap,
   history,
   historyKeymap,
 } from "@codemirror/commands";
-import { markdownSlim, markdownLanguage } from "./markdown-slim.js";
 
 // =============================================================
 // Tauri 集成层
@@ -32,15 +37,11 @@ if (isTauri) {
   invoke = window.__TAURI__.core?.invoke;
 }
 
-// 当前打开的文件路径
 let currentFilePath = null;
-// 文件是否被修改过
 let isDirty = false;
-// 正在从磁盘加载文件时置为 true,避免误判为 dirty
 let isLoadingFile = false;
-// 自动保存防抖定时器
 let autoSaveTimer = null;
-const AUTO_SAVE_DELAY = 800; // ms
+const AUTO_SAVE_DELAY = 800;
 
 async function loadFileFromPath(path) {
   if (!invoke || !path) return false;
@@ -49,17 +50,15 @@ async function loadFileFromPath(path) {
     const content = await invoke("read_file", { path });
     const view = window.editorView;
     view.dispatch({
-      changes: {
-        from: 0,
-        to: view.state.doc.length,
-        insert: content,
-      },
+      changes: { from: 0, to: view.state.doc.length, insert: content },
       selection: { anchor: 0, head: 0 },
     });
     currentFilePath = path;
     isDirty = false;
     updateTitle();
     isLoadingFile = false;
+    // 加载文件后立即触发一次预览渲染
+    triggerPreviewRender();
     return true;
   } catch (e) {
     isLoadingFile = false;
@@ -69,8 +68,7 @@ async function loadFileFromPath(path) {
 }
 
 async function saveCurrentFile() {
-  if (!invoke) return;
-  if (!currentFilePath) return;
+  if (!invoke || !currentFilePath) return;
   try {
     const content = window.editorView.state.doc.toString();
     await invoke("write_file", { path: currentFilePath, content });
@@ -108,24 +106,17 @@ function showSaveIndicator() {
   const indicator = document.getElementById("save-indicator");
   if (!indicator) return;
   indicator.style.opacity = "1";
-  setTimeout(() => {
-    indicator.style.opacity = "0";
-  }, 1200);
+  setTimeout(() => { indicator.style.opacity = "0"; }, 1200);
 }
 
-// 启动时尝试读取命令行传入的文件
 if (isTauri) {
   (async () => {
     const path = await invoke("get_cli_file");
-    if (path) {
-      await loadFileFromPath(path);
-    } else {
-      updateTitle();
-    }
+    if (path) await loadFileFromPath(path);
+    else updateTitle();
   })();
 }
 
-// 键盘快捷键
 if (isTauri) {
   document.addEventListener("keydown", async (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === "s") {
@@ -135,324 +126,120 @@ if (isTauri) {
   });
 }
 
-// -------------------------------------------------------------
-// 白名单:需要被隐藏 / 弱化的 Markdown 语法符号节点名。
-// -------------------------------------------------------------
-const HIDABLE_MARKS = new Set([
-  "HeaderMark",
-  "EmphasisMark",
-  "CodeMark",
-  "HighlightMark",
-  "MathMark",
-  "FootnoteRefMark",
-  "StrikethroughMark",
-  "TaskMarker",
-  "QuoteMark",
-  "ListMark",
-  "LinkMark",
-]);
-
 // =============================================================
-// 核心插件:动态装饰器 (Hybrid Rendering Plugin)
+// 核心: 防抖预览渲染 + 滚动同步
 // =============================================================
-const hybridRenderingPlugin = ViewPlugin.fromClass(
-  class {
-    constructor(view) {
-      this.decorations = this.buildDecorations(view);
-    }
 
-    update(update) {
-      this.decorations = this.decorations.map(update.changes);
+// 防抖定时器 —— 200ms 内连续输入不触发 IPC，停顿后才发送
+let previewDebounceTimer = null;
+const PREVIEW_DEBOUNCE_MS = 200;
 
-      if (
-        update.selectionSet &&
-        !update.docChanged &&
-        !update.viewportChanged
-      ) {
-        const oldLine = update.startState.doc.lineAt(
-          update.startState.selection.main.head
-        ).number;
-        const newLine = update.state.doc.lineAt(
-          update.state.selection.main.head
-        ).number;
-        if (oldLine === newLine) return;
-      }
+// 标记是否正在等待 IPC 返回，用于避免并发请求堆积
+let previewInFlight = false;
 
-      if (
-        update.docChanged &&
-        !update.selectionSet &&
-        !update.viewportChanged
-      ) {
-        if (update.state.doc.lines === update.startState.doc.lines) {
-          let hasMarker = false;
-          update.changes.iterChanges((fromA, toA, fromB, toB, inserted) => {
-            if (hasMarker) return;
-            if (/[#`*_\[\]>\-|!=^$~]/.test(inserted.toString())) {
-              hasMarker = true;
-            }
-          });
-          if (!hasMarker) return;
-        }
-      }
+// 待发送的文本缓存 —— 防抖期间如果又有新输入，覆盖旧值
+let pendingText = null;
 
-      if (update.docChanged || update.selectionSet || update.viewportChanged) {
-        this.decorations = this.buildDecorations(update.view);
-      }
-    }
+/**
+ * 触发预览渲染 —— 入口函数。
+ * 每次文档变化时调用，内部通过防抖机制控制 IPC 频率。
+ */
+function triggerPreviewRender() {
+  const view = window.editorView;
+  if (!view) return;
 
-    buildDecorations(view) {
-      const decorations = [];
-      const state = view.state;
-      const doc = state.doc;
+  // 缓存最新文本（防抖期间持续更新，只保留最后一次）
+  pendingText = view.state.doc.toString();
 
-      const activeLines = new Set();
-      for (const range of state.selection.ranges) {
-        const fromLine = doc.lineAt(range.from).number;
-        const toLine = doc.lineAt(range.to).number;
-        for (let n = fromLine; n <= toLine; n++) {
-          activeLines.add(n);
-        }
-      }
-
-      for (const { from, to } of view.visibleRanges) {
-        syntaxTree(state).iterate({
-          from,
-          to,
-          enter: (node) => {
-            const lineNumber = doc.lineAt(node.from).number;
-            const cursorOnLine = activeLines.has(lineNumber);
-
-            if (node.name.startsWith("ATXHeading")) {
-              const level = node.name.charAt(10);
-              const line = doc.lineAt(node.from);
-              decorations.push(
-                Decoration.line({
-                  attributes: {
-                    class: `cm-heading cm-heading-${level}`,
-                  },
-                }).range(line.from)
-              );
-            }
-
-            // Setext headings
-            if (node.name.startsWith("SetextHeading")) {
-              const level = node.name.charAt(13);
-              const line = doc.lineAt(node.from);
-              decorations.push(
-                Decoration.line({
-                  attributes: {
-                    class: `cm-heading cm-heading-${level}`,
-                  },
-                }).range(line.from)
-              );
-            }
-
-            if (node.name === "Emphasis") {
-              decorations.push(
-                Decoration.mark({ class: "cm-em" }).range(
-                  node.from,
-                  node.to
-                )
-              );
-            } else if (node.name === "StrongEmphasis") {
-              decorations.push(
-                Decoration.mark({ class: "cm-strong" }).range(
-                  node.from,
-                  node.to
-                )
-              );
-            } else if (node.name === "Strikethrough") {
-              decorations.push(
-                Decoration.mark({ class: "cm-strikethrough" }).range(
-                  node.from,
-                  node.to
-                )
-              );
-            } else if (node.name === "InlineCode") {
-              decorations.push(
-                Decoration.mark({ class: "cm-inline-code" }).range(
-                  node.from,
-                  node.to
-                )
-              );
-            } else if (node.name === "Highlight") {
-              decorations.push(
-                Decoration.mark({ class: "cm-highlight" }).range(
-                  node.from,
-                  node.to
-                )
-              );
-            } else if (node.name === "InlineMath") {
-              decorations.push(
-                Decoration.mark({ class: "cm-inline-math" }).range(
-                  node.from,
-                  node.to
-                )
-              );
-            } else if (node.name === "BlockMath") {
-              decorations.push(
-                Decoration.mark({ class: "cm-block-math" }).range(
-                  node.from,
-                  node.to
-                )
-              );
-            } else if (node.name === "FootnoteRef") {
-              decorations.push(
-                Decoration.mark({ class: "cm-footnote-ref" }).range(
-                  node.from,
-                  node.to
-                )
-              );
-            } else if (node.name === "Link") {
-              decorations.push(
-                Decoration.mark({ class: "cm-link" }).range(
-                  node.from,
-                  node.to
-                )
-              );
-            } else if (node.name === "Image") {
-              decorations.push(
-                Decoration.mark({ class: "cm-image" }).range(
-                  node.from,
-                  node.to
-                )
-              );
-            } else if (node.name === "URL") {
-              decorations.push(
-                Decoration.mark({ class: "cm-url" }).range(
-                  node.from,
-                  node.to
-                )
-              );
-            } else if (node.name === "FencedCode") {
-              decorations.push(
-                Decoration.mark({ class: "cm-fenced-code" }).range(
-                  node.from,
-                  node.to
-                )
-              );
-            } else if (node.name === "CodeBlock") {
-              decorations.push(
-                Decoration.mark({ class: "cm-code-block" }).range(
-                  node.from,
-                  node.to
-                )
-              );
-            } else if (node.name === "HorizontalRule") {
-              decorations.push(
-                Decoration.mark({ class: "cm-hr" }).range(
-                  node.from,
-                  node.to
-                )
-              );
-            } else if (node.name === "Blockquote") {
-              decorations.push(
-                Decoration.mark({ class: "cm-blockquote" }).range(
-                  node.from,
-                  node.to
-                )
-              );
-            } else if (node.name === "BulletList") {
-              decorations.push(
-                Decoration.mark({ class: "cm-bullet-list" }).range(
-                  node.from,
-                  node.to
-                )
-              );
-            } else if (node.name === "OrderedList") {
-              decorations.push(
-                Decoration.mark({ class: "cm-ordered-list" }).range(
-                  node.from,
-                  node.to
-                )
-              );
-            } else if (node.name === "ListItem") {
-              decorations.push(
-                Decoration.mark({ class: "cm-list-item" }).range(
-                  node.from,
-                  node.to
-                )
-              );
-            } else if (node.name === "Task") {
-              decorations.push(
-                Decoration.mark({ class: "cm-task" }).range(
-                  node.from,
-                  node.to
-                )
-              );
-            } else if (node.name === "Table") {
-              decorations.push(
-                Decoration.mark({ class: "cm-table" }).range(
-                  node.from,
-                  node.to
-                )
-              );
-            } else if (node.name === "TableHeader") {
-              decorations.push(
-                Decoration.mark({ class: "cm-table-header" }).range(
-                  node.from,
-                  node.to
-                )
-              );
-            } else if (node.name === "TableRow") {
-              decorations.push(
-                Decoration.mark({ class: "cm-table-row" }).range(
-                  node.from,
-                  node.to
-                )
-              );
-            } else if (node.name === "TableCell") {
-              decorations.push(
-                Decoration.mark({ class: "cm-table-cell" }).range(
-                  node.from,
-                  node.to
-                )
-              );
-            } else if (node.name === "TableDelimiter") {
-              decorations.push(
-                Decoration.mark({ class: "cm-table-delimiter" }).range(
-                  node.from,
-                  node.to
-                )
-              );
-            }
-
-            if (HIDABLE_MARKS.has(node.name)) {
-              let from = node.from;
-              let to = node.to;
-              if (
-                node.name === "HeaderMark" &&
-                doc.sliceString(to, to + 1) === " "
-              ) {
-                to += 1;
-              }
-              if (cursorOnLine) {
-                decorations.push(
-                  Decoration.mark({ class: "cm-syntax-mark" }).range(
-                    from,
-                    to
-                  )
-                );
-              } else {
-                decorations.push(
-                  Decoration.replace({}).range(from, to)
-                );
-              }
-            }
-          },
-        });
-      }
-
-      return Decoration.set(decorations, true);
-    }
-  },
-  {
-    decorations: (v) => v.decorations,
+  // 清除旧的定时器，重新计时
+  if (previewDebounceTimer) {
+    clearTimeout(previewDebounceTimer);
   }
-);
+
+  previewDebounceTimer = setTimeout(() => {
+    previewDebounceTimer = null;
+    flushPreviewRender();
+  }, PREVIEW_DEBOUNCE_MS);
+}
+
+/**
+ * 实际发送 IPC 请求 —— 防抖结束后执行。
+ * 如果已有请求在飞行中，跳过本次（等返回后会检查 pendingText）。
+ */
+async function flushPreviewRender() {
+  if (previewInFlight || pendingText === null) return;
+
+  const text = pendingText;
+  pendingText = null;
+
+  previewInFlight = true;
+  try {
+    // 调用 Rust: 全量文本 -> 完整 HTML
+    const html = await invoke("parse_markdown_to_html", { content: text });
+
+    // 直接注入右侧预览区 —— 极简，无 Diff，无 Virtual DOM
+    const preview = document.getElementById("preview");
+    if (preview) {
+      preview.innerHTML = html;
+    }
+  } catch (e) {
+    console.error("Preview render failed:", e);
+  } finally {
+    previewInFlight = false;
+    // 如果防抖期间又有新文本，继续处理
+    if (pendingText !== null) {
+      flushPreviewRender();
+    }
+  }
+}
 
 // =============================================================
-// 脏状态追踪:监听文档修改
+// 滚动同步: 左侧编辑区滚动时，右侧预览区按比例跟随
+// =============================================================
+
+function setupScrollSync() {
+  const editorPane = document.querySelector("#editor-pane .cm-scroller");
+  const previewPane = document.getElementById("preview");
+  if (!editorPane || !previewPane) return;
+
+  let isEditorScrolling = false;
+  let isPreviewScrolling = false;
+  let syncTimer = null;
+
+  /**
+   * 计算滚动比例并同步到目标元素。
+   * 比例 = scrollTop / (scrollHeight - clientHeight)
+   * 这样无论两栏内容高度是否相同，都能保持相对位置对齐。
+   */
+  function syncScroll(source, target) {
+    const sourceMax = source.scrollHeight - source.clientHeight;
+    const targetMax = target.scrollHeight - target.clientHeight;
+    if (sourceMax <= 0 || targetMax <= 0) return;
+
+    const ratio = source.scrollTop / sourceMax;
+    target.scrollTop = ratio * targetMax;
+  }
+
+  editorPane.addEventListener("scroll", () => {
+    if (isPreviewScrolling) return;
+    isEditorScrolling = true;
+    syncScroll(editorPane, previewPane);
+    // 清除标记，允许另一侧响应
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(() => { isEditorScrolling = false; }, 50);
+  });
+
+  previewPane.addEventListener("scroll", () => {
+    if (isEditorScrolling) return;
+    isPreviewScrolling = true;
+    syncScroll(previewPane, editorPane);
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(() => { isPreviewScrolling = false; }, 50);
+  });
+}
+
+// =============================================================
+// 脏状态追踪 + 预览触发
 // =============================================================
 const dirtyTracker = ViewPlugin.fromClass(
   class {
@@ -461,6 +248,8 @@ const dirtyTracker = ViewPlugin.fromClass(
         isDirty = true;
         updateTitle();
         scheduleAutoSave();
+        // 文档变化 -> 触发预览渲染（带防抖）
+        triggerPreviewRender();
       }
     }
   }
@@ -475,25 +264,27 @@ const initialDoc =
     ? window.__INITIAL_MD_CONTENT__
     : `# 欢迎使用 mdX
 
-这是一个**沉浸式**的本地 Markdown 编辑器。
+这是一个**左右分屏**的本地 Markdown 编辑器。
 
-## 快捷键
+## 左侧编辑
 
+- 纯文本输入，零干扰
 - \`Ctrl + S\` 保存当前文件
-- 双击任意 \`.md\` 文件即可用本编辑器打开
+- 支持所有标准 Markdown 语法
 
-### 混合渲染
+## 右侧预览
 
-把光标移动到这一行,你会看到 \`#\` 符号自动出现。
-当光标离开后,符号又会悄悄隐藏。
+实时渲染 Rust 解析后的 HTML，滚动自动同步。
 
-~~删除线~~ 和 ==高亮文本== 也可以正常渲染。
+~~删除线~~ 和 **粗体** 都可以正常渲染。
 
-行内公式 $E=mc^2$ 和块级公式:
+> 引用块也可以正常显示
 
-$$
-a^2 + b^2 = c^2
-$$
+\`\`\`rust
+fn main() {
+    println!("Hello from Rust!");
+}
+\`\`\`
 
 开始写作吧。
 `;
@@ -509,9 +300,20 @@ const startState = EditorState.create({
     keymap.of([...defaultKeymap, ...historyKeymap]),
     drawSelection(),
     EditorView.lineWrapping,
-    markdownSlim(),
-    hybridRenderingPlugin,
     dirtyTracker,
+    EditorView.theme({
+      ".cm-content": {
+        padding: "60px 28px 30vh",
+        fontFamily: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace",
+        fontSize: "15px",
+        lineHeight: "1.75",
+        color: "var(--text)",
+        caretColor: "var(--accent)",
+      },
+      ".cm-line": {
+        padding: "0 2px",
+      },
+    }),
   ],
 });
 
@@ -524,9 +326,11 @@ const view = new EditorView({
 });
 
 view.focus();
-
-// 暴露到全局
 window.editorView = view;
+
+// 初始化: 设置滚动同步 + 首次预览渲染
+setupScrollSync();
+triggerPreviewRender();
 
 // 启动耗时
 requestAnimationFrame(() => {
@@ -536,8 +340,6 @@ requestAnimationFrame(() => {
   if (el && elapsed != null) {
     el.textContent = `boot ${elapsed}ms`;
     el.style.opacity = "1";
-    setTimeout(() => {
-      el.style.opacity = "0";
-    }, 2500);
+    setTimeout(() => { el.style.opacity = "0"; }, 2500);
   }
 });
