@@ -306,18 +306,60 @@ html, body {
 }
 
 /* ============================================================
-   浮动指示器
+   状态栏 —— 保存引擎状态反馈
    ============================================================ */
-#save-indicator {
+#status-bar {
   position: fixed;
   bottom: 20px;
   right: 28px;
   font-size: 12px;
-  color: var(--muted);
-  opacity: 0;
-  transition: opacity 0.3s;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  transition: color 0.3s, opacity 0.3s;
   pointer-events: none;
   z-index: 100;
+  user-select: none;
+}
+
+/* 空闲状态 —— 与背景融合 */
+#status-bar.idle {
+  color: var(--muted);
+  opacity: 0.6;
+}
+
+/* 保存中 —— 淡灰色 */
+#status-bar.saving {
+  color: var(--muted);
+  opacity: 1;
+}
+
+/* 已保存 —— 绿色闪烁 */
+#status-bar.saved {
+  color: #3fb950;
+  opacity: 1;
+}
+
+/* 草稿模式 —— 黄色提示 */
+#status-bar.draft {
+  color: #d29922;
+  opacity: 1;
+}
+
+/* 冲突警告 —— 红色 */
+#status-bar.conflict {
+  color: #f85149;
+  opacity: 1;
+}
+
+/* 错误 —— 红色 */
+#status-bar.error {
+  color: #f85149;
+  opacity: 1;
+}
+
+/* 忙碌 —— 灰色 */
+#status-bar.busy {
+  color: var(--muted);
+  opacity: 1;
 }
 
 #boot-timing {

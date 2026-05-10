@@ -3,14 +3,16 @@
 // 架构原则: Fat Rust, Thin UI
 //   - 左侧: CodeMirror 6 纯文本编辑区，只负责捕获输入
 //   - 右侧: HTML 预览区，Rust 解析后的渲染结果直接注入
-//   - Rust 负责: 所有 Markdown 解析、完整 HTML 树生成
+//   - Rust 负责: 所有文件 IO、状态管理、冲突检测、原子写入
 //
-// 核心机制: 防抖全量通信 + 滚动同步
-//   1. 监听 CM6 updateListener，用户打字停顿时(200ms)触发 IPC
+// 核心机制: 防抖全量通信 + 滚动同步 + 双轨保存引擎
+//   1. 监听 CM6 updateListener，用户打字停顿时触发 IPC
 //   2. 提取编辑器全量文本，发给 Rust parse_markdown_to_html
 //   3. Rust 用 pulldown-cmark 零拷贝解析，返回完整 HTML
 //   4. 前端直接将 HTML 注入右侧 preview-pane (innerHTML)
 //   5. 左侧滚动时，按比例同步右侧 scrollTop，保持视角对齐
+//   6. 保存: 1000ms 防抖自动保存 + Cmd+S 手动保存 + Cmd+Shift+S 另存为
+//   7. 退出: 拦截 CloseRequested，flush 保存后再关闭
 // =============================================================
 
 console.log("预注数据:", window.__INITIAL_MD_CONTENT__);
@@ -33,17 +35,231 @@ import {
 // =============================================================
 const isTauri = typeof window !== "undefined" && !!window.__TAURI__;
 let invoke = null;
+let tauriEvent = null;
 
 if (isTauri) {
   invoke = window.__TAURI__.core?.invoke;
+  tauriEvent = window.__TAURI__.event;
 }
 
-let currentFilePath = null;
-let isDirty = false;
-let isLoadingFile = false;
+// =============================================================
+// 全局保存锁与状态
+// =============================================================
+let isSaving = false;        // 保存锁：防止并发 IPC 请求
+let saveStatus = "idle";     // idle | saving | saved | conflict | draft | error
+let isDirty = false;         // 文档是否被修改过
+let isLoadingFile = false;   // 是否正在加载文件（避免触发脏状态）
 let autoSaveTimer = null;
-const AUTO_SAVE_DELAY = 800;
+const AUTO_SAVE_DELAY = 1000;
 
+// 从 Rust 同步的文档信息
+let docInfo = {
+  path: null,
+  isDraft: true,
+  lastSaved: null,
+};
+
+// =============================================================
+// 状态栏更新
+// =============================================================
+function updateStatusBar(status, detail = null) {
+  const bar = document.getElementById("status-bar");
+  const text = document.getElementById("status-text");
+  if (!bar || !text) return;
+
+  saveStatus = status;
+  bar.className = ""; // 清除旧状态类
+  bar.classList.add(status);
+
+  switch (status) {
+    case "saving":
+      text.textContent = "保存中...";
+      break;
+    case "saved":
+      text.textContent = detail ? `已保存 ${detail}` : "已保存";
+      // 2秒后淡出为灰色
+      setTimeout(() => {
+        if (saveStatus === "saved") {
+          bar.classList.remove("saved");
+          bar.classList.add("idle");
+        }
+      }, 2000);
+      break;
+    case "draft":
+      text.textContent = "草稿模式 — Cmd+Shift+S 另存为";
+      break;
+    case "conflict":
+      text.textContent = "⚠️ 外部修改冲突 — 请另存为或强制覆盖";
+      break;
+    case "error":
+      text.textContent = detail ? `保存失败: ${detail}` : "保存失败";
+      break;
+    case "busy":
+      text.textContent = "保存进行中...";
+      break;
+    default:
+      text.textContent = docInfo.isDraft
+        ? "草稿模式 — Cmd+Shift+S 另存为"
+        : docInfo.lastSaved
+        ? `已保存 ${docInfo.lastSaved}`
+        : "";
+  }
+}
+
+// =============================================================
+// 同步 Rust 文档信息
+// =============================================================
+async function syncDocumentInfo() {
+  if (!invoke) return;
+  try {
+    const info = await invoke("get_document_info");
+    docInfo = {
+      path: info.path || null,
+      isDraft: info.is_draft,
+      lastSaved: info.last_saved || null,
+    };
+    updateTitle();
+    if (docInfo.isDraft) {
+      updateStatusBar("draft");
+    }
+  } catch (e) {
+    console.error("Sync doc info failed:", e);
+  }
+}
+
+// =============================================================
+// 标题更新
+// =============================================================
+let lastTitle = "";
+function updateTitle(force = false) {
+  if (!invoke) return;
+  const name = docInfo.path
+    ? docInfo.path.split(/[\\/]/).pop()
+    : "未命名";
+  const dirtyMark = isDirty ? " *" : "";
+  const title = `${name}${dirtyMark} - mdX`;
+  if (force || title !== lastTitle) {
+    invoke("set_window_title", { title });
+    lastTitle = title;
+  }
+}
+
+// =============================================================
+// 核心保存函数 —— 带锁的防弹保存
+// =============================================================
+async function performSave({ force = false, isAuto = false } = {}) {
+  if (!invoke) return;
+
+  // 保存锁：如果已有保存请求在处理中，拦截后续请求
+  if (isSaving) {
+    if (!isAuto) updateStatusBar("busy");
+    return;
+  }
+
+  const view = window.editorView;
+  if (!view) return;
+  const content = view.state.doc.toString();
+
+  // 草稿模式下自动保存不触发（避免频繁提示）
+  if (docInfo.isDraft && isAuto && !force) {
+    updateStatusBar("draft");
+    return;
+  }
+
+  isSaving = true;
+  updateStatusBar("saving");
+
+  try {
+    const result = await invoke("save_document", { content, force });
+
+    switch (result.status) {
+      case "Saved":
+        isDirty = false;
+        docInfo.path = result.path;
+        docInfo.isDraft = false;
+        docInfo.lastSaved = result.timestamp;
+        updateTitle();
+        updateStatusBar("saved", result.timestamp);
+        break;
+      case "Conflict":
+        updateStatusBar("conflict");
+        // 冲突时保持 dirty 状态
+        break;
+      case "Draft":
+        updateStatusBar("draft");
+        break;
+      case "Busy":
+        updateStatusBar("busy");
+        break;
+      case "Error":
+        updateStatusBar("error", result.message);
+        break;
+    }
+  } catch (e) {
+    console.error("Save failed:", e);
+    updateStatusBar("error", e.toString());
+  } finally {
+    isSaving = false;
+  }
+}
+
+// =============================================================
+// 另存为
+// =============================================================
+async function performSaveAs() {
+  if (!invoke) return;
+  if (isSaving) {
+    updateStatusBar("busy");
+    return;
+  }
+
+  const view = window.editorView;
+  if (!view) return;
+  const content = view.state.doc.toString();
+
+  isSaving = true;
+  updateStatusBar("saving");
+
+  try {
+    const result = await invoke("save_as", { content });
+    switch (result.status) {
+      case "Saved":
+        isDirty = false;
+        docInfo.path = result.path;
+        docInfo.isDraft = false;
+        docInfo.lastSaved = result.timestamp;
+        updateTitle();
+        updateStatusBar("saved", result.timestamp);
+        break;
+      case "Error":
+        updateStatusBar("error", result.message);
+        break;
+      case "Busy":
+        updateStatusBar("busy");
+        break;
+    }
+  } catch (e) {
+    console.error("Save as failed:", e);
+    updateStatusBar("error", e.toString());
+  } finally {
+    isSaving = false;
+  }
+}
+
+// =============================================================
+// 自动保存调度
+// =============================================================
+function scheduleAutoSave() {
+  if (autoSaveTimer) clearTimeout(autoSaveTimer);
+  autoSaveTimer = setTimeout(() => {
+    autoSaveTimer = null;
+    if (isDirty) performSave({ force: false, isAuto: true });
+  }, AUTO_SAVE_DELAY);
+}
+
+// =============================================================
+// 加载文件
+// =============================================================
 async function loadFileFromPath(path) {
   if (!invoke || !path) return false;
   try {
@@ -54,11 +270,12 @@ async function loadFileFromPath(path) {
       changes: { from: 0, to: view.state.doc.length, insert: content },
       selection: { anchor: 0, head: 0 },
     });
-    currentFilePath = path;
     isDirty = false;
     updateTitle();
     isLoadingFile = false;
-    // 加载文件后立即触发一次预览渲染
+    // 同步 Rust 状态
+    await syncDocumentInfo();
+    // 加载后触发预览
     triggerPreviewRender();
     return true;
   } catch (e) {
@@ -68,61 +285,58 @@ async function loadFileFromPath(path) {
   }
 }
 
-async function saveCurrentFile() {
-  if (!invoke || !currentFilePath) return;
-  try {
-    const content = window.editorView.state.doc.toString();
-    await invoke("write_file", { path: currentFilePath, content });
-    isDirty = false;
-    updateTitle();
-    showSaveIndicator();
-  } catch (e) {
-    console.error("Failed to save file:", e);
-  }
-}
-
-function scheduleAutoSave() {
-  if (!invoke || !currentFilePath) return;
-  if (autoSaveTimer) clearTimeout(autoSaveTimer);
-  autoSaveTimer = setTimeout(() => {
-    if (isDirty) saveCurrentFile();
-  }, AUTO_SAVE_DELAY);
-}
-
-let lastTitle = "";
-function updateTitle(force = false) {
-  if (!invoke) return;
-  const name = currentFilePath
-    ? currentFilePath.split(/[\\/]/).pop()
-    : "未命名";
-  const dirtyMark = isDirty ? " *" : "";
-  const title = `${name}${dirtyMark} - mdX`;
-  if (force || title !== lastTitle) {
-    invoke("set_window_title", { title });
-    lastTitle = title;
-  }
-}
-
-function showSaveIndicator() {
-  const indicator = document.getElementById("save-indicator");
-  if (!indicator) return;
-  indicator.style.opacity = "1";
-  setTimeout(() => { indicator.style.opacity = "0"; }, 1200);
-}
-
+// =============================================================
+// 初始化：同步文档信息 + 加载 CLI 文件
+// =============================================================
 if (isTauri) {
   (async () => {
+    await syncDocumentInfo();
     const path = await invoke("get_cli_file");
-    if (path) await loadFileFromPath(path);
-    else updateTitle();
+    if (path) {
+      await loadFileFromPath(path);
+    } else {
+      updateTitle();
+      if (docInfo.isDraft) updateStatusBar("draft");
+    }
   })();
 }
 
+// =============================================================
+// 快捷键绑定
+// =============================================================
 if (isTauri) {
   document.addEventListener("keydown", async (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+    const meta = e.ctrlKey || e.metaKey;
+    if (meta && e.key === "s") {
       e.preventDefault();
-      await saveCurrentFile();
+      if (e.shiftKey) {
+        // Cmd+Shift+S → 另存为
+        await performSaveAs();
+      } else {
+        // Cmd+S → 保存（强制覆盖冲突）
+        await performSave({ force: true });
+      }
+    }
+  });
+}
+
+// =============================================================
+// 优雅退出监听 —— Rust 发来 req-flush-save 时执行最终保存
+// =============================================================
+if (isTauri && tauriEvent) {
+  tauriEvent.listen("req-flush-save", async () => {
+    console.log("[Exit] Received flush request from Rust");
+    try {
+      const view = window.editorView;
+      if (view) {
+        const content = view.state.doc.toString();
+        await invoke("save_document", { content, force: true });
+      }
+      await invoke("acknowledge_flush");
+    } catch (e) {
+      console.error("[Exit] Flush save failed:", e);
+      // 即使失败也通知 Rust 关闭，避免窗口卡死
+      await invoke("acknowledge_flush");
     }
   });
 }
@@ -131,73 +345,42 @@ if (isTauri) {
 // 核心: 防抖预览渲染 + 滚动同步
 // =============================================================
 
-// 防抖定时器 —— 200ms 内连续输入不触发 IPC，停顿后才发送
 let previewDebounceTimer = null;
 const PREVIEW_DEBOUNCE_MS = 200;
-
-// 标记是否正在等待 IPC 返回，用于避免并发请求堆积
 let previewInFlight = false;
-
-// 待发送的文本缓存 —— 防抖期间如果又有新输入，覆盖旧值
 let pendingText = null;
 
-/**
- * 触发预览渲染 —— 入口函数。
- * 每次文档变化时调用，内部通过防抖机制控制 IPC 频率。
- */
 function triggerPreviewRender() {
   const view = window.editorView;
   if (!view) return;
-
-  // 缓存最新文本（防抖期间持续更新，只保留最后一次）
   pendingText = view.state.doc.toString();
-
-  // 清除旧的定时器，重新计时
-  if (previewDebounceTimer) {
-    clearTimeout(previewDebounceTimer);
-  }
-
+  if (previewDebounceTimer) clearTimeout(previewDebounceTimer);
   previewDebounceTimer = setTimeout(() => {
     previewDebounceTimer = null;
     flushPreviewRender();
   }, PREVIEW_DEBOUNCE_MS);
 }
 
-/**
- * 实际发送 IPC 请求 —— 防抖结束后执行。
- * 如果已有请求在飞行中，跳过本次（等返回后会检查 pendingText）。
- */
 async function flushPreviewRender() {
   if (previewInFlight || pendingText === null) return;
-
   const text = pendingText;
   pendingText = null;
-
   previewInFlight = true;
   try {
-    // 调用 Rust: 全量文本 -> 完整 HTML
     const html = await invoke("parse_markdown_to_html", { content: text });
-
-    // 直接注入右侧预览区 —— 极简，无 Diff，无 Virtual DOM
     const preview = document.getElementById("preview");
-    if (preview) {
-      preview.innerHTML = html;
-    }
+    if (preview) preview.innerHTML = html;
   } catch (e) {
     console.error("Preview render failed:", e);
   } finally {
     previewInFlight = false;
-    // 如果防抖期间又有新文本，继续处理
-    if (pendingText !== null) {
-      flushPreviewRender();
-    }
+    if (pendingText !== null) flushPreviewRender();
   }
 }
 
 // =============================================================
-// 滚动同步: 左侧编辑区滚动时，右侧预览区按比例跟随
+// 滚动同步
 // =============================================================
-
 function setupScrollSync() {
   const editorPane = document.querySelector("#editor-pane .cm-scroller");
   const previewPane = document.getElementById("preview");
@@ -207,25 +390,17 @@ function setupScrollSync() {
   let isPreviewScrolling = false;
   let syncTimer = null;
 
-  /**
-   * 计算滚动比例并同步到目标元素。
-   * 比例 = scrollTop / (scrollHeight - clientHeight)
-   * 这样无论两栏内容高度是否相同，都能保持相对位置对齐。
-   */
   function syncScroll(source, target) {
     const sourceMax = source.scrollHeight - source.clientHeight;
     const targetMax = target.scrollHeight - target.clientHeight;
     if (sourceMax <= 0 || targetMax <= 0) return;
-
-    const ratio = source.scrollTop / sourceMax;
-    target.scrollTop = ratio * targetMax;
+    target.scrollTop = (source.scrollTop / sourceMax) * targetMax;
   }
 
   editorPane.addEventListener("scroll", () => {
     if (isPreviewScrolling) return;
     isEditorScrolling = true;
     syncScroll(editorPane, previewPane);
-    // 清除标记，允许另一侧响应
     clearTimeout(syncTimer);
     syncTimer = setTimeout(() => { isEditorScrolling = false; }, 50);
   });
@@ -240,7 +415,7 @@ function setupScrollSync() {
 }
 
 // =============================================================
-// 脏状态追踪 + 预览触发
+// 脏状态追踪 + 预览触发 + 自动保存
 // =============================================================
 const dirtyTracker = ViewPlugin.fromClass(
   class {
@@ -249,7 +424,6 @@ const dirtyTracker = ViewPlugin.fromClass(
         isDirty = true;
         updateTitle();
         scheduleAutoSave();
-        // 文档变化 -> 触发预览渲染（带防抖）
         triggerPreviewRender();
       }
     }
@@ -270,7 +444,8 @@ const initialDoc =
 ## 左侧编辑
 
 - 纯文本输入，零干扰
-- \`Ctrl + S\` 保存当前文件
+- \`Cmd + S\` 保存当前文件
+- \`Cmd + Shift + S\` 另存为
 - 支持所有标准 Markdown 语法
 
 ## 右侧预览
@@ -329,7 +504,7 @@ const view = new EditorView({
 view.focus();
 window.editorView = view;
 
-// 初始化: 设置滚动同步 + 首次预览渲染
+// 初始化
 setupScrollSync();
 triggerPreviewRender();
 
