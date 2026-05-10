@@ -1,11 +1,11 @@
 [package]
-name = "mdedit"
+name = "mdx"
 version = "0.1.2"
 description = "A local Markdown editor built with Tauri"
 edition = "2021"
 
 [lib]
-name = "mdedit_lib"
+name = "mdx_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

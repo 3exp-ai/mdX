@@ -94,7 +94,7 @@ function updateTitle(force = false) {
     ? currentFilePath.split(/[\\/]/).pop()
     : "未命名";
   const dirtyMark = isDirty ? " *" : "";
-  const title = `${name}${dirtyMark} - mdedit`;
+  const title = `${name}${dirtyMark} - mdX`;
   if (force || title !== lastTitle) {
     invoke("set_window_title", { title });
     lastTitle = title;
@@ -466,7 +466,7 @@ const dirtyTracker = ViewPlugin.fromClass(
 // =============================================================
 // 初始文档
 // =============================================================
-const initialDoc = `# 欢迎使用 mdedit
+const initialDoc = `# 欢迎使用 mdX
 
 这是一个**沉浸式**的本地 Markdown 编辑器。
 

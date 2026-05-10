@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "mdedit",
+  "productName": "mdX",
   "version": "0.1.2",
-  "identifier": "com.mdedit.app",
+  "identifier": "com.mdx.app",
   "build": {
     "frontendDist": "../public",
     "devUrl": "http://localhost:8080"
@@ -12,7 +12,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "mdedit",
+        "title": "mdX",
         "width": 1200,
         "height": 800,
         "center": true,

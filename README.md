@@ -1,4 +1,4 @@
-# mdedit
+# mdX
 
 A lightweight, immersive Markdown editor built with [Tauri](https://tauri.app/) + [CodeMirror 6](https://codemirror.net/).
 
@@ -7,7 +7,7 @@ A lightweight, immersive Markdown editor built with [Tauri](https://tauri.app/) 
 - **Hybrid rendering** — Markdown syntax marks (`#`, `*`, `` ` ``) are hidden when the cursor is away, and revealed when you move the cursor to that line. Feels like a rendered document, edits like raw text.
 - **Local-first** — Reads and writes `.md` / `.markdown` / `.mdown` files directly on disk. No cloud, no account, no network required.
 - **Auto-save** — 800ms debounce after any edit. Ctrl+S for manual save.
-- **File association** — Double-click any Markdown file to open it in mdedit (via Windows registry entry).
+- **File association** — Double-click any Markdown file to open it in mdX (via Windows registry entry).
 - **Dark mode** — Follows system preference automatically.
 - **Fast startup** — ~65ms from HTML parse to editor ready. Total cold launch dominated by WebView2 process spawn (~600–1200ms on first boot after reboot; <500ms on warm starts).
 
@@ -38,7 +38,7 @@ cd ../src-tauri
 cargo build --release
 ```
 
-The executable is at `src-tauri/target/release/mdedit.exe`.
+The executable is at `src-tauri/target/release/mdx.exe`.
 
 > **Note:** The `custom-protocol` feature is enabled by default on the `tauri` dependency so that `cargo build --release` loads embedded assets correctly. If you use `cargo tauri build` instead, the CLI handles this automatically.
 

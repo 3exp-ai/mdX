@@ -5,7 +5,7 @@ src-tauri/target/
 src-tauri/gen/
 
 # Release packages
-mdedit-v0.*-windows/
+mdX-v0.*-windows/
 *.zip
 
 # Vendor source (reconstructible via vendorize.py)

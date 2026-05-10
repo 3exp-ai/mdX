@@ -1702,7 +1702,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mdedit"
+name = "mdx"
 version = "0.1.2"
 dependencies = [
  "serde",
