@@ -203,13 +203,26 @@ struct Settings {
 pub struct FileMeta {
     pub name: String,
     pub path: String,
-    /// 所属文件夹名（从路径截取，用于前端区分来源）
+    /// 所属子文件夹名（从路径截取，用于前端区分来源）
     pub parent_name: String,
     /// 修改时间字符串，用于前端显示
     pub mtime_str: String,
     /// 原始 mtime，用于排序
     #[serde(skip)]
     pub mtime: SystemTime,
+}
+
+/// 侧边栏目录分组 —— 按工作区分组，每组可折叠
+#[derive(Serialize, Clone, Debug)]
+pub struct SidebarGroup {
+    /// 目录显示名（取最后一级文件夹名）
+    pub dir_name: String,
+    /// 目录规范路径
+    pub dir_path: String,
+    /// 是否为默认笔记目录
+    pub is_default: bool,
+    /// 该目录下的文件列表，已按 mtime 降序排列
+    pub files: Vec<FileMeta>,
 }
 
 /// 获取配置目录（平台适配：macOS ~/Library/Application Support，Linux ~/.config，Windows AppData）
@@ -322,45 +335,75 @@ fn scan_md_files(dir: &std::path::Path) -> Vec<FileMeta> {
     files
 }
 
-/// 加载侧边栏文件流 —— 实时扫描，按 mtime 降序排列
+/// 加载侧边栏文件流 —— 按工作区分组，每组内按 mtime 降序排列
 ///
 /// 流程：
 ///   1. 确保默认笔记目录存在
 ///   2. 读取 settings.json 中的 workspaces
-///   3. 用 walkdir 扫描默认目录 + 所有外挂目录
-///   4. 按 mtime 降序排列，一次性返回
+///   3. 分别扫描每个目录，形成独立分组
+///   4. 每组内文件按 mtime 降序排列
 #[tauri::command]
-fn load_sidebar_stream() -> Result<Vec<FileMeta>, String> {
-    // 1. 确保默认笔记目录存在
+fn load_sidebar_stream() -> Result<Vec<SidebarGroup>, String> {
     let default_dir = get_default_notes_dir();
     if !default_dir.exists() {
         std::fs::create_dir_all(&default_dir)
             .map_err(|e| format!("创建默认笔记目录失败: {}", e))?;
     }
 
-    // 2. 读取配置
     let settings = load_settings();
 
-    // 3. 收集所有需要扫描的目录
-    let mut dirs_to_scan: Vec<PathBuf> = vec![default_dir];
+    // 收集所有需要扫描的目录（canonical 路径去重）
+    let default_canonical = std::fs::canonicalize(&default_dir)
+        .unwrap_or_else(|_| default_dir.clone());
+    let default_key = default_canonical.to_string_lossy().to_string();
+
+    let mut dirs_to_scan: Vec<(PathBuf, bool, String)> = vec![(
+        default_dir.clone(),
+        true,
+        default_dir
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string(),
+    )];
+    let mut seen: Vec<String> = vec![default_key];
+
     for ws in &settings.workspaces {
         let p = PathBuf::from(ws);
-        if p.exists() && p.is_dir() {
-            dirs_to_scan.push(p);
+        if !p.exists() || !p.is_dir() {
+            continue;
+        }
+        let canonical = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+        let key = canonical.to_string_lossy().to_string();
+        if !seen.contains(&key) {
+            let name = p
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            seen.push(key);
+            dirs_to_scan.push((p, false, name));
         }
     }
 
-    // 4. 扫描所有目录
-    let mut all_files: Vec<FileMeta> = Vec::new();
-    for dir in dirs_to_scan {
+    // 分别扫描每个目录，形成分组
+    let mut groups: Vec<SidebarGroup> = Vec::new();
+    for (dir, is_default, dir_name) in dirs_to_scan {
         let mut files = scan_md_files(&dir);
-        all_files.append(&mut files);
+        files.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+        let dir_path = std::fs::canonicalize(&dir)
+            .unwrap_or_else(|_| dir.clone())
+            .to_string_lossy()
+            .to_string();
+        groups.push(SidebarGroup {
+            dir_name,
+            dir_path,
+            is_default,
+            files,
+        });
     }
 
-    // 5. 按 mtime 降序排列（最新的在前）
-    all_files.sort_by(|a, b| b.mtime.cmp(&a.mtime));
-
-    Ok(all_files)
+    Ok(groups)
 }
 
 /// 添加工作区 —— 唤起文件夹选择器，将路径追加到 settings.json
@@ -406,6 +449,19 @@ async fn add_workspace(app_handle: AppHandle) -> Result<AddWorkspaceResult, Stri
     let path_str = canonical.to_string_lossy().to_string();
 
     let mut settings = load_settings();
+
+    // 排除默认笔记目录，避免重复扫描
+    let default_dir = get_default_notes_dir();
+    let default_canonical = std::fs::canonicalize(&default_dir).unwrap_or_else(|_| default_dir.clone());
+    let default_str = default_canonical.to_string_lossy().to_string();
+    if path_str == default_str {
+        return Ok(AddWorkspaceResult {
+            status: "already_exists".into(),
+            path: Some(path_str),
+            message: "默认笔记目录已在侧边栏中".into(),
+        });
+    }
+
     if settings.workspaces.contains(&path_str) {
         return Ok(AddWorkspaceResult {
             status: "already_exists".into(),
@@ -720,6 +776,52 @@ fn get_document_info(state: tauri::State<AppState>) -> DocumentInfo {
     }
 }
 
+/// 检查 Claude Code CLI 状态
+#[derive(Serialize, Clone, Debug)]
+struct ClaudeStatus {
+    installed: bool,
+    version: Option<String>,
+    model: Option<String>,
+}
+
+fn read_claude_model() -> Option<String> {
+    let home = dirs::home_dir()?;
+    let settings_path = home.join(".claude").join("settings.json");
+    let content = std::fs::read_to_string(&settings_path).ok()?;
+    let settings: serde_json::Value = serde_json::from_str(&content).ok()?;
+    settings
+        .get("env")?
+        .get("ANTHROPIC_MODEL")?
+        .as_str()
+        .map(|s| s.to_string())
+}
+
+#[tauri::command]
+fn check_claude_status() -> ClaudeStatus {
+    // which::which 用于在 PATH 中查找 claude 可执行文件
+    match which::which("claude") {
+        Ok(_) => {
+            let version = std::process::Command::new("claude")
+                .arg("--version")
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.trim().to_string());
+            let model = read_claude_model();
+            ClaudeStatus {
+                installed: true,
+                version,
+                model,
+            }
+        }
+        Err(_) => ClaudeStatus {
+            installed: false,
+            version: None,
+            model: None,
+        },
+    }
+}
+
 /// 前端确认 flush 完成 —— 触发实际窗口关闭。
 #[tauri::command]
 fn acknowledge_flush(state: tauri::State<AppState>, app_handle: AppHandle) {
@@ -953,6 +1055,7 @@ pub fn run() {
             load_sidebar_stream,
             add_workspace,
             create_new_note,
+            check_claude_status,
         ])
         .setup(move |app| {
             if let Some(window) = app.get_webview_window("main") {

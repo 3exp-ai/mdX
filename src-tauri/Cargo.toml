@@ -25,6 +25,7 @@ tauri-plugin-dialog = "2.7.1"
 chrono = "0.4.44"
 walkdir = "2.5.0"
 dirs = "6.0.0"
+which = "8"
 
 [profile.release]
 opt-level = 2

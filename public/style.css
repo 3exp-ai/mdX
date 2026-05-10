@@ -157,6 +157,68 @@ html, body {
   line-height: 1.2;
 }
 
+/* 目录分组 */
+.sidebar-group {
+  margin: 4px 6px;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.sidebar-group-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 7px 12px;
+  cursor: pointer;
+  user-select: none;
+  border-radius: 6px;
+  transition: background 0.1s;
+}
+
+.sidebar-group-header:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.sidebar-group-arrow {
+  font-size: 10px;
+  color: var(--muted);
+  transition: transform 0.15s;
+  flex-shrink: 0;
+  width: 12px;
+  text-align: center;
+}
+
+.sidebar-group.collapsed .sidebar-group-arrow {
+  transform: rotate(-90deg);
+}
+
+.sidebar-group-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.sidebar-group-count {
+  font-size: 10px;
+  color: var(--muted);
+  opacity: 0.5;
+  flex-shrink: 0;
+}
+
+.sidebar-group-files {
+  padding: 2px 0;
+}
+
+.sidebar-group.collapsed .sidebar-group-files {
+  display: none;
+}
+
 /* 空状态 */
 .sidebar-empty {
   padding: 30px 16px;
@@ -234,6 +296,50 @@ body:has(#sidebar.sidebar-collapsed) #split-container {
   background: var(--divider);
   flex-shrink: 0;
   cursor: col-resize;
+}
+
+/* Claude Code 状态指示器 —— 预览区右上角 */
+#claude-status {
+  position: absolute;
+  top: 4px;
+  right: 12px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--muted);
+  opacity: 0.6;
+  cursor: default;
+  transition: all 0.15s;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  pointer-events: auto;
+  user-select: none;
+}
+
+#claude-status:hover {
+  opacity: 1;
+  color: var(--text);
+}
+
+#claude-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #f85149;
+  flex-shrink: 0;
+  transition: background 0.3s;
+}
+
+#claude-dot.installed {
+  background: #3fb950;
+}
+
+#claude-model-text {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 预览折叠按钮 */

@@ -1,9 +1,11 @@
 {
   "dependencies": {
     "@codemirror/commands": "^6.10.3",
+    "@codemirror/language": "^6.10.0",
     "@codemirror/state": "^6.6.0",
     "@codemirror/view": "^6.42.1",
     "@lezer/common": "^1.5.2",
-    "@lezer/markdown": "^1.6.3"
+    "@lezer/markdown": "^1.6.3",
+    "@tauri-apps/api": "^2.0.0"
   }
 }

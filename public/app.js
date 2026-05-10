@@ -483,11 +483,11 @@ async function refreshSidebarList() {
   }
 }
 
-/// 渲染文件列表到容器
-function renderSidebarList(files, container) {
+/// 渲染分组文件列表到容器
+function renderSidebarList(groups, container) {
   container.innerHTML = "";
 
-  if (!files || files.length === 0) {
+  if (!groups || groups.length === 0) {
     container.innerHTML = `
       <div class="sidebar-empty">
         暂无笔记<br>
@@ -497,10 +497,53 @@ function renderSidebarList(files, container) {
     return;
   }
 
-  for (const file of files) {
-    const el = createSidebarItem(file);
-    container.appendChild(el);
+  for (const group of groups) {
+    const section = createSidebarGroup(group);
+    container.appendChild(section);
   }
+}
+
+/// 创建目录分组 DOM（可折叠）
+function createSidebarGroup(group) {
+  const section = document.createElement("div");
+  section.className = "sidebar-group";
+
+  // 分组头部（点击折叠/展开）
+  const header = document.createElement("div");
+  header.className = "sidebar-group-header";
+
+  const arrow = document.createElement("span");
+  arrow.className = "sidebar-group-arrow";
+  arrow.textContent = "▾";
+  header.appendChild(arrow);
+
+  const nameEl = document.createElement("span");
+  nameEl.className = "sidebar-group-name";
+  nameEl.textContent = group.dir_name;
+  header.appendChild(nameEl);
+
+  const countEl = document.createElement("span");
+  countEl.className = "sidebar-group-count";
+  countEl.textContent = group.files.length;
+  header.appendChild(countEl);
+
+  header.addEventListener("click", () => {
+    section.classList.toggle("collapsed");
+  });
+
+  section.appendChild(header);
+
+  // 文件列表
+  const fileList = document.createElement("div");
+  fileList.className = "sidebar-group-files";
+
+  for (const file of group.files) {
+    const el = createSidebarItem(file);
+    fileList.appendChild(el);
+  }
+
+  section.appendChild(fileList);
+  return section;
 }
 
 /// 创建单个文件项 DOM
@@ -516,7 +559,7 @@ function createSidebarItem(file) {
   nameEl.textContent = file.name;
   item.appendChild(nameEl);
 
-  // 所属文件夹名
+  // 所属子文件夹名
   const parentEl = document.createElement("div");
   parentEl.className = "item-parent";
   parentEl.textContent = file.parent_name;
@@ -553,6 +596,37 @@ function highlightSidebarActive() {
       item.classList.add("active");
       break;
     }
+  }
+}
+
+/// 查询 Claude Code CLI 安装状态，更新预览区指示器
+async function initClaudeStatus() {
+  if (!isTauri) return;
+  const dot = document.getElementById("claude-dot");
+  const text = document.getElementById("claude-model-text");
+  const container = document.getElementById("claude-status");
+  if (!dot || !text || !container) return;
+
+  try {
+    const status = await invoke("check_claude_status");
+    if (status.installed) {
+      dot.classList.add("installed");
+      const modelInfo = status.model || "unknown model";
+      const versionInfo = status.version || "";
+      container.title = versionInfo
+        ? `Claude Code ${versionInfo} — ${modelInfo}`
+        : `Claude Code — ${modelInfo}`;
+      text.textContent = modelInfo;
+    } else {
+      dot.classList.remove("installed");
+      container.title = "Claude Code 未安装";
+      text.textContent = "未安装";
+    }
+  } catch (e) {
+    dot.classList.remove("installed");
+    container.title = "无法检测 Claude Code 状态";
+    text.textContent = "检测失败";
+    console.error("Check claude status failed:", e);
   }
 }
 
@@ -635,6 +709,7 @@ window.editorView = view;
 setupScrollSync();
 initPreviewToggle();
 initSidebarToggle();
+initClaudeStatus();
 triggerPreviewRender();
 
 // 启动耗时
