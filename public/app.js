@@ -19,6 +19,7 @@ import {
   EditorView,
   keymap,
   drawSelection,
+  ViewPlugin,
 } from "@codemirror/view";
 import { EditorState } from "@codemirror/state";
 import {
